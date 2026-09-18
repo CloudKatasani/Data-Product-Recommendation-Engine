@@ -47,10 +47,15 @@ async function api(path, options = {}) {
   let payload = null;
   try { payload = await response.json(); } catch { payload = null; }
   if (!response.ok) {
-    if (response.status === 401) { state.principal = null; paintIdentity(); }
+    if (response.status === 401) {
+      state.principal = null;
+      paintIdentity();
+      paintSignInNotice();
+    }
     const error = new Error(problemText(payload, response));
     error.status = response.status;
     error.code = payload && payload.code ? payload.code : '';
+    error.signIn = Boolean(payload && payload.sign_in);
     throw error;
   }
   return payload;
@@ -154,7 +159,21 @@ async function refreshPrincipal() {
   return state.principal;
 }
 
+function paintStartNotice() {
+  /* Shown before anything is attempted. Running the engine and uploading an
+     extract both write, and a write with no name on it is what the whole
+     review gate exists to prevent. */
+  const host = $('#start-identity');
+  if (!host) return;
+  host.innerHTML = '';
+  if (state.principal && state.principal.identity) return;
+  host.append(signInBanner(
+    'Sign in before you start. Uploading an extract and running the engine both '
+    + 'write to the run store, and every write carries the name it was made under.'));
+}
+
 function paintIdentity() {
+  paintStartNotice();
   const host = $('#identity');
   if (!host) return;
   host.innerHTML = '';
@@ -189,9 +208,30 @@ function signOut() {
   flash('Signed out. Reading is still open; deciding is not.', 'info');
 }
 
+/* Telling somebody they are not authenticated is not help. The banner carries
+   the button that fixes it, and it is shown wherever the refusal happened. */
+function signInBanner(message) {
+  const banner = el('div', { class: 'banner error' }, message + ' ');
+  banner.append(el('button', { class: 'ghost sm', onclick: async () => {
+    await signIn();
+    if (state.principal && state.principal.identity) banner.remove();
+  } }, 'Sign in'));
+  return banner;
+}
+
+function paintSignInNotice() {
+  const host = $('#flash');
+  if (!host || host.querySelector('.banner.error')) return;
+  host.innerHTML = '';
+  host.append(signInBanner('You are not signed in, so the engine refused that.'));
+}
+
 function requireIdentity(what) {
   if (state.principal && state.principal.identity) return true;
-  flash(`Sign in before you ${what}: every decision is attributed to a principal.`, 'error');
+  const host = $('#flash');
+  host.innerHTML = '';
+  host.append(signInBanner(
+    `Sign in before you ${what}: every action is attributed to a principal.`));
   return false;
 }
 
@@ -271,6 +311,7 @@ $('#btn-run-automated').addEventListener('click', async () => {
   status.innerHTML = '';
   status.append(el('span', { class: 'spinner' }), ' generating the pack and running the seven agents...');
   try {
+    if (!requireIdentity('run the engine')) { status.textContent = ''; return; }
     const seed = $('#auto-seed').value;
     const payload = {
       industry: state.selectedIndustry,
@@ -286,8 +327,9 @@ $('#btn-run-automated').addEventListener('click', async () => {
     status.textContent = '';
     await adoptRun(result);
   } catch (error) {
-    status.textContent = '';
-    flash(error.message, 'error', 12000);
+    status.innerHTML = '';
+    if (error.status === 401) status.append(signInBanner(error.message));
+    else flash(error.message, 'error', 12000);
   } finally {
     button.disabled = false;
   }
@@ -311,14 +353,28 @@ const dropzone = $('#dropzone');
 }));
 dropzone.addEventListener('drop', (event) => uploadFiles(event.dataTransfer.files));
 $('#btn-browse').addEventListener('click', () => $('#file-input').click());
-$('#file-input').addEventListener('change', (event) => uploadFiles(event.target.files));
+$('#file-input').addEventListener('change', (event) => {
+  const files = event.target.files;
+  /* Clearing the input means picking the same file twice in a row fires a
+     change event the second time too. Without this, a retry after a failed
+     upload does nothing at all and looks like the browser ignored the click. */
+  event.target.value = '';
+  uploadFiles(files);
+});
 
 async function uploadFiles(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return;
+  const status = $('#manual-status');
+  if (!(state.principal && state.principal.identity)) {
+    /* Fail here rather than after the bytes have gone up: an extract is the
+       client's data, and it should not leave the machine to be refused. */
+    status.innerHTML = '';
+    status.append(signInBanner('Sign in before uploading an extract.'));
+    return;
+  }
   const form = new FormData();
   files.forEach(file => form.append('files', file, file.name));
-  const status = $('#manual-status');
   status.innerHTML = '';
   status.append(el('span', { class: 'spinner' }), ` reading ${files.length} file(s)...`);
   try {
@@ -327,8 +383,9 @@ async function uploadFiles(fileList) {
     data.files.forEach(file => state.uploads.push(file));
     renderUploads();
   } catch (error) {
-    status.textContent = '';
-    flash(error.message, 'error', 12000);
+    status.innerHTML = '';
+    if (error.status === 401) status.append(signInBanner(error.message));
+    else flash(error.message, 'error', 12000);
   }
 }
 
@@ -433,6 +490,7 @@ $('#btn-run-manual').addEventListener('click', async () => {
   status.innerHTML = '';
   status.append(el('span', { class: 'spinner' }), ' resolving, canonicalizing, clustering, scoring...');
   try {
+    if (!requireIdentity('run the engine')) { status.textContent = ''; return; }
     const result = await api('/api/run/manual', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

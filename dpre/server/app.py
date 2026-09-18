@@ -1480,14 +1480,18 @@ class Handler(BaseHTTPRequestHandler):
         """Role check at the boundary; a handler re-checks with a domain."""
         roles = tuple(getattr(route, "roles", ()) or ())
         action = getattr(route, "action", "")
+        dev_identity = self._policy().dev_identity_allowed
         if roles:
             if not self.principal.authenticated:
-                raise problem("DPRE-AUTH-001", "This request carries no identity.")
+                raise problem("DPRE-AUTH-001",
+                              "Sign in before you do this." if dev_identity
+                              else "This request carries no identity.",
+                              sign_in=bool(dev_identity))
             if not any(self.principal.has_role(role) for role in roles):
                 raise problem("DPRE-AUTH-002",
                               "This route requires one of: " + ", ".join(roles) + ".")
             return
-        authorize(self.principal, action)
+        authorize(self.principal, action, dev_identity=dev_identity)
 
     def _run(self, handler: Callable, request: dict, match, body: dict, parsed) -> int:
         from ..store import ProposeOnlyError

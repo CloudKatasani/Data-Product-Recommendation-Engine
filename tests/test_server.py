@@ -403,3 +403,61 @@ def test_a_consumer_confirmation_clears_g1_and_is_keyed_by_lineage(server, run_i
     history = get(base, f"/api/v1/runs/{run_id}/candidates/"
                         f"{candidate['candidate_id']}/history")
     assert history["candidate_id"] == candidate["candidate_id"]
+
+
+def test_an_unauthenticated_upload_is_refused_with_the_remedy_that_applies(server):
+    """The Manual path writes, so it needs an identity. On a loopback instance
+    the remedy is to sign in, not to configure a single sign-on proxy: naming
+    the wrong one sends somebody to fix something that is not broken."""
+    base, _ = server
+    boundary = "----dpretest"
+    body = (f"--{boundary}\r\n".encode()
+            + b'Content-Disposition: form-data; name="files"; filename="a.csv"\r\n'
+            + b"Content-Type: text/csv\r\n\r\nid,name\r\n1,x\r\n"
+            + f"--{boundary}--\r\n".encode())
+    request = urllib.request.Request(
+        f"{base}/api/upload", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "X-DPRE-Request": "1"})          # no identity header
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        urllib.request.urlopen(request, timeout=30)
+    assert excinfo.value.code == 401
+    problem = json.loads(excinfo.value.read())
+    assert problem["code"] == "DPRE-AUTH-001"
+    assert "Sign in" in problem["detail"]
+    # The flag the browser reads, so it can offer the button instead of
+    # reporting the refusal and leaving the user stuck.
+    assert problem["sign_in"] is True
+    assert problem["required_action"] == "run"
+
+
+def test_running_the_engine_unauthenticated_is_refused_the_same_way(server):
+    base, _ = server
+    request = urllib.request.Request(
+        f"{base}/api/run/automated", data=json.dumps({"industry": "retail"}).encode(),
+        headers={"Content-Type": "application/json", "X-DPRE-Request": "1"}, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        urllib.request.urlopen(request, timeout=30)
+    assert excinfo.value.code == 401
+    assert json.loads(excinfo.value.read())["sign_in"] is True
+
+
+def test_the_browser_asks_for_a_name_before_it_sends_a_client_extract(server):
+    """An extract is the client's data. The application refuses locally rather
+    than uploading the bytes and being refused afterwards."""
+    base, _ = server
+    with urllib.request.urlopen(f"{base}/app.js", timeout=30) as response:
+        script = response.read().decode()
+    upload = script.split("async function uploadFiles(")[1].split("\n}")[0]
+    assert "state.principal" in upload and "signInBanner" in upload
+    assert upload.index("signInBanner") < upload.index("new FormData")
+
+    # Selecting the same file twice must fire the change event twice, or a
+    # retry after a failure silently does nothing.
+    assert "event.target.value = ''" in script
+
+    # The Start tab says so before anything is attempted.
+    with urllib.request.urlopen(f"{base}/", timeout=30) as response:
+        page = response.read().decode()
+    assert 'id="start-identity"' in page
+    assert "function paintStartNotice" in script

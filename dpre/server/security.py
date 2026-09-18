@@ -355,15 +355,26 @@ def resolve_principal(headers: Mapping[str, str], client_address: str,
     return Principal(auth_method="none", client_address=peer)
 
 
-def authorize(principal: Principal, action: str, domain: str = "") -> None:
-    """Raise unless ``principal`` may perform ``action`` (optionally in ``domain``)."""
+def authorize(principal: Principal, action: str, domain: str = "",
+              dev_identity: bool = False) -> None:
+    """Raise unless ``principal`` may perform ``action`` (optionally in ``domain``).
+
+    ``dev_identity`` says whether this instance accepts a name typed into the
+    browser, which is true on a loopback bind. It only changes the sentence: a
+    refusal that names a single sign-on proxy to somebody running on their own
+    laptop tells them to fix the wrong thing.
+    """
     if not action:
         return
     if not principal.authenticated:
-        raise problem("DPRE-AUTH-001",
-                      "This request carries no identity. Authenticate through the "
-                      "configured proxy or a bearer token.",
-                      required_action=action)
+        raise problem(
+            "DPRE-AUTH-001",
+            "Sign in before you do this. This instance is on loopback, so the name "
+            "you sign in with is the name that goes on the record."
+            if dev_identity else
+            "This request carries no identity. Authenticate through the "
+            "configured proxy or a bearer token.",
+            required_action=action, sign_in=bool(dev_identity))
     if not principal.may(action):
         raise problem("DPRE-AUTH-002",
                       f"'{action}' requires one of: "
