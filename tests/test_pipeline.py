@@ -18,7 +18,7 @@ def test_every_agent_reports(run):
     result, _store = run
     agents = [entry["agent"] for entry in result.manifest.agent_log]
     assert agents == ["Ingestor", "Resolver", "Canonicalizer", "Clusterer", "Scorer",
-                      "Narrator", "Critic", "Programme"]
+                      "Narrator", "Critic", "Programme", "Assessor"]
     assert all(entry["seconds"] >= 0 for entry in result.manifest.agent_log)
     assert all(entry["note"] for entry in result.manifest.agent_log)
 

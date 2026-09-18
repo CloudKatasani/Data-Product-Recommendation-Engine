@@ -142,7 +142,7 @@ def test_the_plan_persists_and_exports(utility, tmp_path):
 
     path = write_remediation_plan_csv(rows, tmp_path / "plan.csv")
     header = path.read_text(encoding="utf-8").splitlines()[0]
-    assert header.startswith("rank,priority,unit_type,subject,owner_role,action")
+    assert header.startswith("rank,priority,unit_type,subject,label,owner_role,action")
     summary = remediation_summary(rows)
     assert summary["units"] == len(rows) and summary["by_owner_role"]
 
@@ -241,3 +241,54 @@ def test_the_dq_scorecard_covers_every_input_and_dimension(utility):
         assert row["result"] in ("pass", "warn", "fail")
         assert row["rows_checked"] >= 0
         assert row["rows_failed"] <= row["rows_checked"]
+
+
+# --------------------------------------------------------------------------
+# The Assessor in the pipeline
+# --------------------------------------------------------------------------
+
+def test_the_pipeline_runs_the_assessor_and_persists_what_it_found(tmp_path):
+    """The ninth agent. Its findings reach the manifest and the store, so a
+    reviewer can ask what the engine was fed without re-running anything."""
+    from dpre.store import Store
+    from dpre.quality.detection import load_detection_scorecard
+    from dpre.quality.dq import load_dq_scorecard
+    from dpre.quality.remediation import load_remediation_plan
+    from dpre.quality.stewardship import load_stewardship_requests
+
+    store = Store(tmp_path / "assess.db")
+    result = run_pipeline(ingest_automated("utility", as_of=AS_OF), store=store,
+                          label="assess")
+    agents = [entry["agent"] for entry in result.manifest.agent_log]
+    assert agents[-1] == "Assessor"
+
+    quality = result.manifest.stats["quality"]
+    assert quality["dq"]["rules"] > 0
+    assert quality["detection"]["recall"] >= 0.80
+    assert quality["remediation"]["units"] > 0
+    assert quality["stewardship"]["requests"] >= 0
+    assert quality["bias"]["entries"] >= 6
+
+    connection = store.connection
+    assert load_dq_scorecard(connection, result.run_id)
+    assert load_detection_scorecard(connection, result.run_id)
+    assert load_remediation_plan(connection, result.run_id)
+    assert load_stewardship_requests(connection, result.run_id)
+    store.close()
+
+
+def test_a_failing_input_rule_becomes_a_run_warning(tmp_path):
+    """A data-quality failure bounds what the run may claim, so it travels with
+    the run rather than sitting in a table nobody opens."""
+    from dpre.store import Store
+
+    store = Store(tmp_path / "warn.db")
+    result = run_pipeline(ingest_automated("banking", as_of=AS_OF), store=store)
+    quality = result.manifest.stats["quality"]
+    failing = [r for r in quality["dq"]["rows"] if r["result"] == "fail"]
+    for row in failing:
+        assert any(row["rule_id"] in warning for warning in result.manifest.warnings)
+    high = quality["remediation"]["by_priority"].get("high", 0)
+    if high:
+        assert any("high-priority lineage gaps" in w for w in result.manifest.warnings)
+    store.close()

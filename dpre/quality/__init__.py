@@ -7,7 +7,8 @@ the numbers go on the manifest for a human to read.
 """
 from .gates import (comparable_previous_run, gate_state, run_publishable, stability_between,
                     stability_gate)
-from .dq import dq_scorecard, ensure_schema as ensure_dq_schema, save_dq_scorecard
+from .dq import (dq_scorecard, ensure_schema as ensure_dq_schema, load_dq_scorecard,
+                 save_dq_scorecard)
 from .detection import (detection_scorecard, ensure_schema as ensure_detection_schema,
                         save_detection_scorecard)
 from .replay import config_hash, config_snapshot, file_digests, freshness_gate, input_dates
@@ -19,7 +20,7 @@ from .bias import bias_register
 
 __all__ = [
     "comparable_previous_run", "gate_state", "run_publishable", "stability_between",
-    "stability_gate", "dq_scorecard", "ensure_dq_schema", "save_dq_scorecard",
+    "stability_gate", "dq_scorecard", "ensure_dq_schema", "load_dq_scorecard", "save_dq_scorecard",
     "detection_scorecard", "ensure_detection_schema", "save_detection_scorecard",
     "config_hash", "config_snapshot", "file_digests", "freshness_gate", "input_dates",
     "ensure_remediation_schema", "remediation_plan", "save_remediation_plan",

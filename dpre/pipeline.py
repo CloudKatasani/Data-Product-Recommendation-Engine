@@ -1,10 +1,15 @@
 """The agent pipeline (specification section 10).
 
 Chartered agents and one human gate: Ingestor, Resolver, Canonicalizer,
-Clusterer, Scorer, Narrator, Critic, and a Programme step that prices and
-sequences what the others found. Each writes only its own output tables and
-stamps a run id, so any recommendation can be replayed from the extracts that
-produced it. No agent can move a candidate's status past Proposed.
+Clusterer, Scorer, Narrator and Critic find the backlog; Programme prices and
+sequences it; Assessor measures the run that produced it. Each writes only its
+own output tables and stamps a run id, so any recommendation can be replayed
+from the extracts that produced it. No agent can move a candidate's status past
+Proposed.
+
+The last two exist because a backlog is not a deliverable. A board cannot
+sequence work it cannot price, and an assurance function will not accept a
+ranking whose inputs, blind spots and detection rate nobody measured.
 
 A run is not stateless. Decisions a human already took - a report marked
 decision-critical, a consumer confirmed, a conflict adjudicated, a metric name
@@ -35,6 +40,9 @@ from .programme import enrich_run
 from .narrate.critic import critique
 from .narrate.narrator import narrate
 from .portfolio.views import portfolio_views
+from .quality import (bias_register, detection_scorecard, dq_scorecard, remediation_plan,
+                      save_detection_scorecard, save_dq_scorecard, save_remediation_plan,
+                      save_stewardship_requests, stewardship_register)
 from .score import apply_classification, score_candidates
 from .store import Store
 from .util.ids import run_id as make_run_id
@@ -51,6 +59,7 @@ class RunResult:
     candidates: list[Candidate] = field(default_factory=list)
     portfolio: dict = field(default_factory=dict)
     programme: dict = field(default_factory=dict)
+    quality: dict = field(default_factory=dict)
     config: EngineConfig = field(default_factory=EngineConfig)
 
     @property
@@ -204,6 +213,27 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
                       "annual benefit", t0, len(cluster.candidates))
     manifest.stats["programme"] = _programme_stats(result.programme)
 
+    # ---- Assessor -----------------------------------------------------
+    # Measures the run rather than the estate: how clean the inputs were, how
+    # much of what was planted the engine actually found, what the gaps would
+    # take to close and who would close them, and what the ranking is blind to.
+    # None of it moves a score; all of it is what an assurance function asks
+    # about before trusting one.
+    t0 = time.time()
+    result.quality = _assess(result, ingest, store)
+    q = result.quality
+    step("Assessor",
+         f"{q['dq']['rules']} data-quality rules on the inputs "
+         f"({q['dq']['failed']} failing), "
+         f"{q['remediation']['units']} remediation units, "
+         f"{q['stewardship']['requests']} steward requests"
+         + (f", detection recall {q['detection']['recall']:.0%}"
+            if q["detection"].get("recall") is not None else ""),
+         t0, q["dq"]["rules"])
+    manifest.stats["quality"] = q
+    for warning in q.get("warnings", []):
+        manifest.warnings.append(warning)
+
     if store is not None:
         # One transaction: a run that persists no candidates is never published,
         # and a half-written run cannot be read as a complete one (section 13.1).
@@ -214,6 +244,7 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
         seeded = seed_from_ledgers(store, run_id)
         if seeded:
             manifest.stats["ledger_seeding"] = seeded
+        _persist_quality(store, run_id, result)
         if previous_run_id:
             delta = carry_forward(store, run_id, previous_run_id)
             manifest.stats["run_delta"] = {
@@ -226,6 +257,78 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
 
 
 # --------------------------------------------------------------------------
+
+def _assess(result: RunResult, ingest: IngestResult, store: Store | None) -> dict:
+    """The Assessor's findings, as plain dicts for the manifest.
+
+    Kept whole here rather than spread through the agents above, because the
+    question it answers - can this run be trusted - is asked once, about the
+    run, and is easier to argue with when the answers sit together.
+    """
+    from .quality.bias import bias_summary
+    from .quality.detection import detection_summary
+    from .quality.remediation import remediation_summary
+    from .quality.stewardship import stewardship_summary
+
+    bundle = ingest.bundle
+    as_of = bundle.as_of_date
+
+    dq_rows = dq_scorecard(bundle, as_of=as_of)
+    failed = [r for r in dq_rows if r["result"] == "fail"]
+
+    # Only a synthetic estate knows what was planted; a client estate returns an
+    # empty scorecard, which is the honest answer rather than a perfect score.
+    detection_rows = detection_scorecard(result, planted=list(bundle.planted_defects or []))
+
+    previous_plan = []
+    if store is not None and getattr(store, "connection", None) is not None:
+        previous_run = store.previous_run_id(result.run_id)
+        if previous_run:
+            from .quality.remediation import load_remediation_plan
+            try:
+                previous_plan = load_remediation_plan(store.connection, previous_run)
+            except Exception:                                  # noqa: BLE001
+                previous_plan = []
+
+    plan = remediation_plan(result, previous=previous_plan)
+    requests = stewardship_register(result)
+
+    warnings: list[str] = []
+    for row in failed:
+        warnings.append(f"DQ-{row['rule_id']}: {row['description']} "
+                        f"({row['rows_failed']} of {row['rows_checked']} rows)")
+    high = [u for u in plan if u["priority"] == "high"]
+    if high:
+        warnings.append(f"{len(high)} high-priority lineage gaps stand between this backlog and "
+                        "a defensible business case; see the remediation plan.")
+
+    return {
+        "dq": {"rules": len(dq_rows), "failed": len(failed),
+               "warned": sum(1 for r in dq_rows if r["result"] == "warn"),
+               "rows": dq_rows},
+        "detection": (detection_summary(detection_rows) | {"rows": detection_rows}
+                      if detection_rows else {"rows": [], "recall": None,
+                                              "note": "nothing planted: not a synthetic estate"}),
+        "remediation": remediation_summary(plan) | {"rows": plan},
+        "stewardship": stewardship_summary(requests, result) | {"rows": requests},
+        "bias": bias_summary(bias_register(result)),
+        "warnings": warnings,
+    }
+
+
+def _persist_quality(store: Store, run_id: str, result: RunResult) -> None:
+    """Write the Assessor's rows. Each module owns its own schema."""
+    quality = result.quality or {}
+    connection = store.connection
+    if quality.get("dq", {}).get("rows"):
+        save_dq_scorecard(connection, run_id, quality["dq"]["rows"])
+    if quality.get("detection", {}).get("rows"):
+        save_detection_scorecard(connection, run_id, quality["detection"]["rows"])
+    if quality.get("remediation", {}).get("rows"):
+        save_remediation_plan(connection, run_id, quality["remediation"]["rows"])
+    if quality.get("stewardship", {}).get("rows"):
+        save_stewardship_requests(connection, run_id, quality["stewardship"]["rows"])
+
 
 def _usage_coverage(candidates: list[Candidate], canonical: CanonicalizationResult,
                     top_n: int) -> float:

@@ -56,6 +56,25 @@ def _print_run(result) -> None:
     print("\n  Agents")
     for entry in summary["agents"]:
         print(f"    {entry['agent']:<14} {entry['seconds']:>6.2f}s  {entry['note']}")
+    quality = summary.get("stats", {}).get("quality") or {}
+    if quality:
+        detection = quality.get("detection") or {}
+        print("\n  Assessment of this run")
+        print(f"    {quality['dq']['rules']} data-quality rules on the inputs: "
+              f"{quality['dq']['failed']} failing, {quality['dq']['warned']} warning")
+        if detection.get("recall") is not None:
+            print(f"    detection recall {detection['recall']:.0%} "
+                  f"({detection['detected']} of {detection['planted']} planted defects found)")
+            if detection.get("classes_missed"):
+                print("    classes missed entirely: "
+                      + ", ".join(detection["classes_missed"]))
+        else:
+            print("    detection not measurable: nothing was planted in this estate")
+        rem = quality["remediation"]
+        print(f"    {rem['units']} remediation units "
+              f"({rem['by_priority'].get('high', 0)} high priority), "
+              f"{quality['stewardship']['requests']} metrics awaiting a steward")
+
     programme = summary.get("stats", {}).get("programme") or {}
     if programme:
         print("\n  Programme")
@@ -485,6 +504,68 @@ def cmd_value(args) -> int:
     return 0
 
 
+def cmd_assess(args) -> int:
+    """What the run's own inputs and blind spots look like, from the store."""
+    store = Store(args.db)
+    run_id = _run_or_latest(store, args.run)
+    from .quality.detection import load_detection_scorecard
+    from .quality.remediation import load_remediation_plan, write_remediation_plan_csv
+    from .quality.stewardship import load_stewardship_requests
+
+    detection = load_detection_scorecard(store.connection, run_id)
+    plan = load_remediation_plan(store.connection, run_id)
+    requests = load_stewardship_requests(store.connection, run_id)
+
+    if args.csv:
+        path = write_remediation_plan_csv(plan, args.csv)
+        print(f"{len(plan)} remediation units written to {path}")
+        store.close()
+        return 0
+
+    print(f"\n  Assessment of run {run_id}")
+    if detection:
+        planted = sum(r["planted"] for r in detection)
+        detected = sum(r["detected"] for r in detection)
+        print(f"\n  Detection against what was planted "
+              f"({detected} of {planted}, {detected / planted:.0%})")
+        print(f"    {'class':<24} {'found':>7}  how it is recognised")
+        for row in detection:
+            print(f"    {row['defect_class']:<24} "
+                  f"{row['detected']:>3}/{row['planted']:<3}  {row['method'][:60]}")
+            if row["missed"] and args.detail:
+                print(f"           missed: {', '.join(row['missed'])}")
+    else:
+        print("\n  Nothing was planted in this estate, so detection is not measurable here.")
+
+    if plan:
+        print(f"\n  Remediation plan ({len(plan)} units)")
+        print(f"    {'rank':>4} {'priority':<8} {'owner':<22} {'runs':>8}  what to fix")
+        for unit in plan[:args.limit]:
+            print(f"    {unit['rank']:>4} {unit['priority']:<8} {unit['owner_role']:<22} "
+                  f"{unit['usage_at_stake']:>8,.0f}  "
+                  f"{(unit.get('label') or unit['subject'])[:48]}")
+            if args.detail:
+                print(f"           {unit['action']}")
+    if requests:
+        print(f"\n  Metrics awaiting a steward ({len(requests)})")
+        for row in requests[:args.limit]:
+            print(f"    {row['canonical_name'][:40]:<40} {row['state']:<11} "
+                  f"{row['suggested_steward'] or '-'}")
+        print("\n    A report owner is accountable for a report, not for a definition. "
+              "Every row above is a question for a domain owner, not an assignment.")
+
+    from .quality.bias import bias_register
+    if args.bias:
+        print("\n  What this ranking is blind to")
+        for entry in bias_register():
+            print(f"    {entry['id']} {entry['name']} ({entry['severity']}, "
+                  f"{entry['direction']})")
+            print(f"           {entry['affects']}")
+            print(f"           mitigation: {entry['mitigation']}")
+    store.close()
+    return 0
+
+
 def cmd_audit(args) -> int:
     """Verify the hash chain and print what an audit function would ask for."""
     store = Store(args.db)
@@ -730,6 +811,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run")
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_value)
+
+    p = subparsers.add_parser("assess",
+                              help="what the run's inputs, blind spots and gaps look like")
+    p.add_argument("--run")
+    p.add_argument("--limit", type=int, default=15)
+    p.add_argument("--detail", action="store_true", help="print the action and the misses")
+    p.add_argument("--bias", action="store_true", help="print the bias register too")
+    p.add_argument("--csv", help="write the remediation plan to this CSV instead of printing")
+    p.set_defaults(func=cmd_assess)
 
     p = subparsers.add_parser("audit", help="verify the decision chain and list exceptions")
     p.add_argument("--run", help="one run (default: every run)")

@@ -229,3 +229,16 @@ def save_dq_scorecard(connection: sqlite3.Connection, run_id: str, rows: list[di
           r["rows_failed"], r["failure_share"], json.dumps(r["sample_ids"]), r["threshold"],
           r["result"]) for r in rows])
     connection.commit()
+
+
+def load_dq_scorecard(connection: sqlite3.Connection, run_id: str) -> list[dict]:
+    """The scorecard for one run, worst result first so a failure leads."""
+    ensure_schema(connection)
+    connection.row_factory = sqlite3.Row
+    rows = [dict(r) for r in connection.execute(
+        "SELECT * FROM DQ_SCORECARD WHERE run_id = ? "
+        "ORDER BY CASE result WHEN 'fail' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, "
+        "         failure_share DESC, input, rule_id", (run_id,)).fetchall()]
+    for row in rows:
+        row["sample_ids"] = json.loads(row["sample_ids"] or "[]")
+    return rows

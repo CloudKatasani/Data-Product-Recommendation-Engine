@@ -1323,6 +1323,78 @@ async function renderRuns() {
   if (state.runId) await renderFeedback();
 }
 
+/* What the run's own inputs looked like, what it missed, and what it is blind
+   to. A reviewer who is about to accept a candidate should be able to see the
+   quality of what the engine was fed without leaving the application. */
+async function renderAssessment(host) {
+  if (!state.runId) return;
+  let dq = null;
+  let detection = null;
+  let remediation = null;
+  try {
+    dq = await api(`/api/v1/runs/${state.runId}/quality`);
+    detection = await api(`/api/v1/runs/${state.runId}/detection`);
+    remediation = await api(`/api/v1/runs/${state.runId}/remediation?limit=10`);
+  } catch (error) {
+    host.append(el('div', { class: 'banner error' }, error.message));
+    return;
+  }
+
+  const rules = dq.rules || [];
+  const failing = rules.filter(r => r.result === 'fail');
+  const warning = rules.filter(r => r.result === 'warn');
+  host.append(el('h3', { class: 'mt-14' }, 'What the engine was fed'));
+  host.append(el('div', { class: 'tiles' },
+    tile(fmt.num(rules.length), 'data-quality rules run', 'on the input extracts'),
+    tile(fmt.num(failing.length), 'failing', failing.length ? 'these bound what may be claimed' : 'none'),
+    tile(fmt.num(warning.length), 'warning'),
+    detection.recall === null
+      ? tile('n/a', 'detection recall', detection.note)
+      : tile(fmt.pct(detection.recall), 'detection recall',
+          `${fmt.num(detection.detected)} of ${fmt.num(detection.planted)} planted defects`)));
+
+  if (failing.length || warning.length) {
+    host.append(tableCard([
+      { label: 'Input', render: r => r.input },
+      { label: 'Dimension', render: r => r.dimension },
+      { label: 'Rule', render: r => el('span', { class: 'small secondary' }, r.description) },
+      { label: 'Failed', num: true, render: r => `${fmt.num(r.rows_failed)} / ${fmt.num(r.rows_checked)}` },
+      { label: 'Result', render: r => chip(r.result, r.result === 'fail' ? 'critical' : 'warning') },
+    ], [...failing, ...warning]));
+  }
+
+  if ((detection.rows || []).length) {
+    /* A demonstration that cannot be wrong is worth nothing, so the classes the
+       engine missed are shown beside the ones it caught. */
+    host.append(el('h3', { class: 'mt-14' }, 'Planted against detected'));
+    host.append(tableCard([
+      { label: 'Defect class', render: r => r.defect_class },
+      { label: 'Found', num: true, render: r => `${r.detected} / ${r.planted}` },
+      { label: 'Recall', num: true, render: r => r.recall === null ? 'n/a' : fmt.pct(r.recall) },
+      { label: 'How it is recognised', render: r => el('span', { class: 'small secondary' }, r.method) },
+      { label: 'Missed', render: r => el('span', { class: 'small muted' }, (r.missed || []).join(', ')) },
+    ], detection.rows));
+  }
+
+  const units = (remediation && remediation.units) || [];
+  if (units.length) {
+    host.append(el('h3', { class: 'mt-14' }, 'What to fix before the next run'));
+    host.append(el('p', { class: 'secondary small' },
+      'Grouped into units one person fixes in one action, ranked by the runs behind them. ' +
+      'A unit marked carried was on the previous run too, which means the fix was not made.'));
+    host.append(tableCard([
+      { label: 'Rank', num: true, render: u => u.rank },
+      { label: 'Priority', render: u => chip(u.priority,
+          u.priority === 'high' ? 'critical' : u.priority === 'medium' ? 'warning' : '') },
+      { label: 'What', render: u => el('div', {}, u.label || u.subject,
+          el('div', { class: 'small muted' }, u.action)) },
+      { label: 'Owner', render: u => u.owner_role },
+      { label: 'Runs at stake', num: true, render: u => fmt.num(u.usage_at_stake) },
+      { label: 'Status', render: u => chip(u.status, u.status === 'carried' ? 'warning' : '') },
+    ], units));
+  }
+}
+
 /* The audit verdict and what moved since the last run. Both belong on the Runs
    tab because that is where somebody goes to ask whether this run can be
    trusted and what changed under it. */
@@ -1350,6 +1422,8 @@ async function renderGovernance() {
       `${weights.weight_version || ''}${weights.approved_by ? ' · ' + weights.approved_by : ''}`),
     tile(fmt.num((delta && delta.rows || []).length), 'candidates changed',
       delta && delta.previous_run_id ? `against ${delta.previous_run_id}` : 'first run')));
+
+  await renderAssessment(host);
 
   if ((audit.findings || []).length) {
     host.append(el('h3', {}, 'What an auditor would ask about'));

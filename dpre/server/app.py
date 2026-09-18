@@ -955,6 +955,47 @@ def build_router(workspace: Workspace) -> Router:
             body.get("subject_id", ""), body.get("occurred_at", ""),
             principal.identity, note=body.get("note", ""))
 
+    # ---- the Assessor's findings ---------------------------------------
+
+    def run_quality(_req, match, _body):
+        """Input data quality for one run, by input and DQ dimension."""
+        from ..quality.dq import load_dq_scorecard
+        run_id = match.group("run_id")
+        return {"run_id": run_id, "rules": load_dq_scorecard(store.connection, run_id)}
+
+    def run_detection(_req, match, _body):
+        """Planted against detected. Empty on a client estate, which is honest."""
+        from ..quality.detection import load_detection_scorecard
+        run_id = match.group("run_id")
+        rows = load_detection_scorecard(store.connection, run_id)
+        planted = sum(r["planted"] for r in rows)
+        detected = sum(r["detected"] for r in rows)
+        return {"run_id": run_id, "rows": rows, "planted": planted, "detected": detected,
+                "recall": round(detected / planted, 4) if planted else None,
+                "note": "" if rows else "nothing was planted in this estate"}
+
+    def run_remediation(req, match, _body):
+        from ..quality.remediation import load_remediation_plan
+        run_id = match.group("run_id")
+        rows = load_remediation_plan(store.connection, run_id)
+        priority = (req["query"].get("priority") or [None])[0]
+        if priority:
+            rows = [row for row in rows if row["priority"] == priority]
+        window, page = paginate(req, rows)
+        return {"run_id": run_id, "units": window, "page": page}
+
+    def run_stewardship(req, match, _body):
+        from ..quality.stewardship import load_stewardship_requests
+        run_id = match.group("run_id")
+        window, page = paginate(req, load_stewardship_requests(store.connection, run_id))
+        return {"run_id": run_id, "requests": window, "page": page}
+
+    def bias(_req, _match, _body):
+        """What the ranking is blind to, with the mitigation in the code."""
+        from ..quality.bias import bias_register, bias_summary
+        rows = bias_register()
+        return {"biases": rows, "summary": bias_summary(rows)}
+
     def feedback(_req, _match, _body):
         return feedback_report(store, ws.config.weights)
 
@@ -1089,6 +1130,19 @@ def build_router(workspace: Workspace) -> Router:
     add("POST", "/api/v1/runs/{run_id}/candidates/{candidate_id}/confirm-consumer",
         confirm_consumer_route, action="review", tag="review",
         summary="Record the named consumer that clears gate G1")
+    add("GET", "/api/v1/runs/{run_id}/quality", run_quality, action="read", tag="assessment",
+        summary="Data quality of the extracts this run was fed")
+    add("GET", "/api/v1/runs/{run_id}/detection", run_detection, action="read",
+        tag="assessment", summary="Planted defects against what the run detected")
+    add("GET", "/api/v1/runs/{run_id}/remediation", run_remediation, action="read",
+        tag="assessment", paginated=True,
+        summary="Lineage and catalog gaps as ranked units with an owner")
+    add("GET", "/api/v1/runs/{run_id}/stewardship", run_stewardship, action="read",
+        tag="assessment", paginated=True,
+        summary="Metrics awaiting a steward, with the question to ask")
+    add("GET", "/api/v1/bias", bias, action="read", tag="assessment",
+        summary="The documented bias assessment for the ranking")
+
     add("GET", "/api/v1/exceptions", exceptions, action="read", tag="governance",
         summary="Gate waivers still in force")
     add("GET", "/api/v1/audit", audit, action="read", tag="governance",
