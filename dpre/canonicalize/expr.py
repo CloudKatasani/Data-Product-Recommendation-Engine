@@ -3,6 +3,19 @@
 One recursive-descent parser serves both dialects: the token shapes differ,
 the arithmetic does not. Anything the parser cannot read is flagged PARSE_FAIL
 and handled as opaque rather than guessed at.
+
+Normalisation rules a steward would check in the Phase 1 sample (review finding
+R-20, specification section 14 falsifier):
+
+* ``DIVIDE(a, b, 0)`` is the standard DAX idiom for a ratio. It normalises to
+  ``a / b`` like the Cognos division does, and the alternate-result argument is
+  kept as a *null rule* rather than as arithmetic, so a DAX estate that writes
+  ``DIVIDE(..., 0)`` everywhere does not show every ratio as a THRESHOLD
+  conflict against Cognos.
+* Only functions that leave the number unchanged are stripped as formatting.
+  ``int()``, ``trunc()`` and ``floor()`` change the number (a truncating bucket
+  is not the raw ratio), so they stay in the arithmetic shape even though the
+  configuration lists ``int`` among the formatting functions.
 """
 from __future__ import annotations
 
@@ -39,6 +52,15 @@ CANONICAL_FUNCTIONS = {
     "median": "agg_median", "stddev": "agg_stddev", "variance": "agg_variance",
 }
 SCOPE_FUNCTIONS = {"values", "all", "allselected", "distinct"}
+# Functions that change the number and therefore must never be stripped as
+# formatting, whatever the configuration says (R-20b). ``convert`` is stripped
+# only when its target type keeps the value (see ``_is_value_changing``).
+VALUE_CHANGING_FUNCTIONS = {"int", "trunc", "truncate", "floor", "ceiling", "ceil"}
+STRIPPABLE_FUNCTIONS = set(FORMATTING_FUNCTIONS) - VALUE_CHANGING_FUNCTIONS
+INTEGER_TYPE_TOKENS = {"int", "integer", "int64", "bigint", "smallint", "whole"}
+# Null-handling functions: their presence is a null rule the Stage 6 model must
+# document (section 5.4), so it is recorded alongside the shape.
+NULL_FUNCTIONS = {"coalesce", "ifnull", "nvl", "isnull", "nullif", "blank", "isblank"}
 OPAQUE_MARKERS = ("#", "<#", "sql(", "macro", "$parameter", "javascript")
 PROMPT_RE = re.compile(r"\?[A-Za-z0-9_ ]+\?")
 
@@ -65,6 +87,10 @@ class ParsedExpression:
     time_modifier: str = ""
     note: str = ""
     parser_version: str = PARSER_VERSION
+    # How the calculation treats a missing or zero denominator: the DAX
+    # alternate result of a 3-argument DIVIDE, or a COALESCE-style wrapper.
+    # Kept out of the fingerprint and surfaced as a documented null rule (R-20a).
+    null_rule: str = ""
 
     @property
     def operand_columns(self) -> list[str]:
@@ -376,14 +402,28 @@ def _normalize_operator(op: str) -> str:
 # Normalization and shape
 # --------------------------------------------------------------------------
 
+def _is_value_changing(name: str, raw_args: list) -> bool:
+    """``convert(x, integer)`` truncates; ``convert(x, double)`` does not (R-20b)."""
+    if name in VALUE_CHANGING_FUNCTIONS:
+        return True
+    if name == "convert" and len(raw_args) > 1:
+        target = raw_args[1]
+        token = ""
+        if isinstance(target, dict):
+            token = str(target.get("v") or target.get("name") or "").lower()
+        return token in INTEGER_TYPE_TOKENS
+    return False
+
+
 def _strip_formatting(node: dict) -> dict:
     """Formatting functions do not change the number, so they leave the shape."""
     if not isinstance(node, dict):
         return node
     if node.get("t") == "fn":
         name = node["name"]
-        args = [_strip_formatting(a) for a in node.get("args", [])]
-        if name in FORMATTING_FUNCTIONS and args:
+        raw_args = node.get("args", [])
+        args = [_strip_formatting(a) for a in raw_args]
+        if name in STRIPPABLE_FUNCTIONS and args and not _is_value_changing(name, raw_args):
             return args[0]
         if name in PASSTHROUGH_FUNCTIONS and name != "divide" and len(args) == 1:
             return args[0]
@@ -420,8 +460,10 @@ def _canonicalize(node: Any) -> Any:
                 return {"t": "fn", "name": "agg_countd",
                         "args": [_canonicalize(a) for a in inner.get("args", [])]}
         args = [_canonicalize(a) for a in raw_args]
-        if name == "divide" and len(args) == 2:
-            return {"t": "op", "op": "/", "args": args}
+        # DIVIDE(a, b) and DIVIDE(a, b, alternate) are both the ratio a / b; the
+        # alternate result is a null rule, collected separately (R-20a).
+        if name == "divide" and len(args) in (2, 3):
+            return {"t": "op", "op": "/", "args": args[:2]}
         if name in SCOPE_FUNCTIONS and len(args) == 1:
             return args[0]
         return {"t": "fn", "name": CANONICAL_FUNCTIONS.get(name, name), "args": args}
@@ -437,6 +479,37 @@ def _canonicalize(node: Any) -> Any:
         return {**node, "expr": _canonicalize(node["expr"]),
                 "dims": [_canonicalize(d) for d in node.get("dims", [])]}
     return node
+
+
+def collect_null_rules(node: Any, into: list[str]) -> None:
+    """Null rules the Stage 6 model must document, read off the raw AST.
+
+    Read before canonicalization, because that step folds the 3-argument DIVIDE
+    into a plain division and would lose the alternate-result argument.
+    """
+    if isinstance(node, list):
+        for item in node:
+            collect_null_rules(item, into)
+        return
+    if not isinstance(node, dict):
+        return
+    kind = node.get("t")
+    if kind == "fn":
+        name = node["name"]
+        args = node.get("args", [])
+        if name == "divide" and len(args) == 3:
+            into.append(f"divide-alternate:{shape_of(args[2])}")
+        elif name in NULL_FUNCTIONS:
+            into.append(f"{name}({','.join(shape_of(a) for a in args[1:])})")
+        collect_null_rules(args, into)
+        return
+    for key in ("args", "dims", "expr", "subject", "else"):
+        if key in node and node[key] is not None:
+            collect_null_rules(node[key], into)
+    if kind == "case":
+        for condition, value in node.get("whens", []):
+            collect_null_rules(condition, into)
+            collect_null_rules(value, into)
 
 
 def split_filters(node: Any) -> tuple[Any, list[Any]]:
@@ -663,6 +736,8 @@ def parse_expression(text: str, language: str = "cognos",
                                 aggregation=(aggregation_hint or "").upper())
 
     stripped = _strip_formatting(ast)
+    null_rules: list[str] = []
+    collect_null_rules(stripped, null_rules)
     measure_ast, filter_args = split_filters(stripped)
     # Time-intelligence arguments become a modifier token, not a filter, so
     # year-over-year variants group with their base measure.
@@ -690,6 +765,7 @@ def parse_expression(text: str, language: str = "cognos",
         literals=literals, shape=shape_of(normalized),
         filter_shape="&".join(sorted(shape_of(f) for f in normalized_filters)),
         time_modifier=time_modifier,
+        null_rule="&".join(sorted(set(null_rules))),
     )
 
 

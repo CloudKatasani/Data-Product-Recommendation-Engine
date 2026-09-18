@@ -2,6 +2,20 @@
 
 The graph is the only thing the recommender reads; nothing downstream touches
 the raw extracts (specification section 4).
+
+Three decisions here answer review findings a governance office would raise on
+the first run:
+
+* A table's owner and steward are the majority over its columns, not whichever
+  column happened to be first in the extract, and a split vote is flagged
+  (R-44). Ownership and stewardship stay separate roles; a Data Domain node
+  carries the domain owner as the escalation point.
+* The business glossary is the term of record (R-34): a column's business term
+  is resolved to a glossary term at build time, and the glossary's definition,
+  steward and status are what downstream reads.
+* The backbone is recorded as declared or inferred (R-47), non-business load
+  steps never lend their grain to a KPI, and a reviewer-confirmed mapping is
+  honoured before ER-1 (R-46).
 """
 from __future__ import annotations
 
@@ -13,9 +27,12 @@ from ..config import ER_PROBABLE_THRESHOLD
 from ..models import (
     ColumnNode, EdgeKpiColumn, ExtractBundle, KnowledgeGraph, KpiNode, QuarantineRow, TableNode,
 )
+from ..glossary.terms import glossary_summary, link_terms
 from ..util.text import normalize_identifier, token_key
+from .domains import build_domain_nodes
 from .grain import (
-    backbone_for, finest_grain, infer_backbone, infer_table_grain, is_measure_like,
+    backbone_for, backbone_source, finest_grain, infer_backbone, infer_table_grain,
+    is_measure_like, is_non_business_grain,
 )
 from .resolver import ResolverIndex, build_index, extend_upstream, resolve_reference
 
@@ -41,18 +58,27 @@ class GraphStats:
         return self.parsed_kpis / total if total else 0.0
 
 
-def build_graph(bundle: ExtractBundle, backbone: list[str] | None = None) -> KnowledgeGraph:
+def build_graph(bundle: ExtractBundle, backbone: list[str] | None = None,
+                manual_mappings: dict[str, str] | None = None) -> KnowledgeGraph:
     graph = KnowledgeGraph(as_of_date=bundle.as_of_date)
     declared = bool(backbone)
     backbone = backbone_for(backbone)
 
+    duplicate_reports = 0
     for report in bundle.reports:
+        # A duplicated report row is a data-quality fact the DQ scorecard reports;
+        # here the first row stands and the count is kept so it is never silent.
+        if report.report_id in graph.reports:
+            duplicate_reports += 1
+            continue
         graph.reports[report.report_id] = report
     for term in bundle.glossary:
         graph.glossary[token_key(term.term)] = term
 
-    backbone = _build_physical_nodes(bundle, graph, backbone, declared=declared)
-    index = build_index(bundle.columns, bundle.lineage)
+    backbone, source = _build_physical_nodes(bundle, graph, backbone, declared=declared)
+    link_terms(graph)
+    setattr(graph, "_domains", build_domain_nodes(graph))
+    index = build_index(bundle.columns, bundle.lineage, manual_mappings)
     stats = _build_kpi_nodes(bundle, graph, index, backbone)
 
     graph.stats = {
@@ -70,14 +96,31 @@ def build_graph(bundle: ExtractBundle, backbone: list[str] | None = None) -> Kno
         "tables": len(graph.tables),
         "edges": len(graph.edges_kpi_column),
         "backbone": backbone,
+        "backbone_source": source,
+        "grain_sources": _count(t.grain_source for t in graph.tables.values()),
+        "non_business_tables": sum(1 for t in graph.tables.values()
+                                   if is_non_business_grain(t.inferred_grain)),
+        "tables_with_steward_disagreement": sum(
+            1 for t in graph.tables.values() if getattr(t, "_steward_disagreement", False)),
+        "duplicate_report_rows": duplicate_reports,
+        "manual_mappings_applied": sum(1 for e in graph.edges_kpi_column if e.er_rule == "ER-0"),
+        "domains": len(getattr(graph, "_domains", {})),
+        "glossary": glossary_summary(graph),
     }
     return graph
+
+
+def _count(values) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for value in values:
+        out[value] = out.get(value, 0) + 1
+    return dict(sorted(out.items()))
 
 
 # --------------------------------------------------------------------------
 
 def _build_physical_nodes(bundle: ExtractBundle, graph: KnowledgeGraph, backbone: list[str],
-                          declared: bool = False) -> list[str]:
+                          declared: bool = False) -> tuple[list[str], str]:
     by_table: dict[str, list[ColumnNode]] = {}
     table_meta: dict[str, dict] = {}
     for record in bundle.columns:
@@ -97,9 +140,15 @@ def _build_physical_nodes(bundle: ExtractBundle, graph: KnowledgeGraph, backbone
             "system": record.system, "table": record.table, "sor": record.system_of_record,
             "lifecycle": record.lifecycle_status, "sunset_date": record.sunset_date,
             "successor": record.successor_system, "domain": record.data_domain,
-            "sub_domain": record.sub_domain, "owner": record.data_owner,
-            "steward": record.data_steward, "row_count": record.row_count,
+            "sub_domain": record.sub_domain, "row_count": record.row_count,
+            "owners": {}, "stewards": {},
         })
+        # Owner and steward are decided by majority over the table's columns, so
+        # the answer does not depend on extract order (R-44).
+        if record.data_owner:
+            meta["owners"][record.data_owner] = meta["owners"].get(record.data_owner, 0) + 1
+        if record.data_steward:
+            meta["stewards"][record.data_steward] = meta["stewards"].get(record.data_steward, 0) + 1
         meta["sor"] = meta["sor"] or record.system_of_record
         if record.lifecycle_status == "sunset":
             meta["lifecycle"] = "sunset"
@@ -119,20 +168,32 @@ def _build_physical_nodes(bundle: ExtractBundle, graph: KnowledgeGraph, backbone
             table_fqn=table_fqn, system=meta["system"], table_name=meta["table"],
             sor_flag=meta["sor"], lifecycle_status=meta["lifecycle"],
             sunset_date=meta["sunset_date"], successor_system=meta["successor"],
-            domain=meta["domain"], sub_domain=meta["sub_domain"], owner_id=meta["owner"],
-            steward_id=meta["steward"], row_count=meta["row_count"],
+            domain=meta["domain"], sub_domain=meta["sub_domain"],
+            owner_id=_majority(meta["owners"]), steward_id=_majority(meta["stewards"]),
+            row_count=meta["row_count"],
             column_count=len(columns),
             measure_count=sum(1 for c in columns if is_measure_like(c)),
         )
+        setattr(node, "_owner_disagreement", len(meta["owners"]) > 1)
+        setattr(node, "_steward_disagreement", len(meta["stewards"]) > 1)
+        setattr(node, "_steward_votes", dict(meta["stewards"]))
         graph.tables[table_fqn] = node
 
-    # The conformed backbone comes from the catalog unless one was declared.
+    # The conformed backbone comes from the catalog unless one was declared, and
+    # the manifest says which it was (R-47).
+    source = backbone_source(list(graph.tables.values()), by_table, declared)
     if not declared:
         backbone = infer_backbone(list(graph.tables.values()), by_table, backbone)
     for table_fqn, node in graph.tables.items():
         node.inferred_grain, node.grain_source = infer_table_grain(
             node, by_table.get(table_fqn, []), backbone)
-    return backbone
+    return backbone, source
+
+
+def _majority(votes: dict[str, int]) -> str:
+    if not votes:
+        return ""
+    return sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
 
 def _build_kpi_nodes(bundle: ExtractBundle, graph: KnowledgeGraph, index: ResolverIndex,
@@ -161,11 +222,16 @@ def _build_kpi_nodes(bundle: ExtractBundle, graph: KnowledgeGraph, index: Resolv
             role = _role_for(row, parsed)
             outcome = resolve_reference(row, row.column, index, row.query_item)
             if isinstance(outcome, tuple):
-                _, reason, detail = outcome
+                _, reason, detail, suggestion = outcome
                 stats.quarantined_rows += 1
-                graph.quarantine.append(QuarantineRow(
+                quarantined = QuarantineRow(
                     kpi_id=kpi_id, raw_reference=row.raw_reference,
-                    reason_code=reason, detail=detail, role=role))
+                    reason_code=reason, detail=detail, role=role)
+                # The near-miss travels as data so the remediation plan can offer
+                # "confirm this mapping" rather than a sentence (R-46).
+                setattr(quarantined, "_suggestion", suggestion or {})
+                setattr(quarantined, "_report_id", row.report_id)
+                graph.quarantine.append(quarantined)
                 continue
             resolution = extend_upstream(outcome, index)
             stats.resolved_rows += 1
@@ -186,7 +252,9 @@ def _build_kpi_nodes(bundle: ExtractBundle, graph: KnowledgeGraph, index: Resolv
         # as operands (a time basis, an entity key) do not set the grain unless the
         # KPI touches no fact table at all.
         operand_tables = [graph.tables[c.rsplit(".", 1)[0]] for c in operand_columns
-                          if c.rsplit(".", 1)[0] in graph.tables]
+                          if c.rsplit(".", 1)[0] in graph.tables
+                          and not is_non_business_grain(
+                              graph.tables[c.rsplit(".", 1)[0]].inferred_grain)]
         fact_like = [t for t in operand_tables if t.measure_count >= 2]
         grains = [t.inferred_grain for t in (fact_like or operand_tables)]
         node = KpiNode(

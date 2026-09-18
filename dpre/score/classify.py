@@ -8,9 +8,12 @@ the runner-up; below 0.6 the archetype is shown as a choice between the top two.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from ..canonicalize.grouping import CanonicalizationResult
 from ..models import Candidate, KnowledgeGraph
+
+if TYPE_CHECKING:                      # annotation only: the canonicalizer imports demand
+    from ..canonicalize.grouping import CanonicalizationResult
 
 ARCHETYPES = (
     "Entity Master", "Reference Data", "Event Stream", "Metric / KPI",

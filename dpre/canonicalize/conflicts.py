@@ -7,9 +7,12 @@ conflicts are the reason two teams will never trust the same number.
 """
 from __future__ import annotations
 
+import re
+
 from ..models import CanonicalMetric, MetricConflict
 from ..util.ids import stable_id
 from ..util.text import tokenize
+from .expr import NULL_FUNCTIONS
 
 TIME_TOKENS = {"calendar", "fiscal", "period", "month", "quarter", "year", "date", "week", "day"}
 DENOMINATOR_PATTERNS = ("denominator", "per", "rate", "ratio", "index")
@@ -33,9 +36,27 @@ PATTERN_DECISIONS = {
 }
 
 
+_COL = re.compile(r"col\(([^()]+)\)")
+
+
+def leaf_operands(metric: CanonicalMetric) -> set[str]:
+    """Operand column leaves as the reports wrote them (R-18).
+
+    Read from the raw arithmetic shape when the canonicalizer recorded one, so a
+    reference the catalog could not resolve still counts as an operand when the
+    pattern is classified; a quarantined denominator is still a denominator.
+    """
+    leaves: set[str] = set()
+    for shape in getattr(metric, "_raw_shapes", []) or []:
+        leaves.update(name.rsplit(".", 1)[-1] for name in _COL.findall(shape))
+    if leaves:
+        return leaves
+    return {c.rsplit(".", 1)[-1].lower() for c in metric.operand_columns}
+
+
 def classify_pattern(metric_a: CanonicalMetric, metric_b: CanonicalMetric,
                      shape_a: str = "", shape_b: str = "") -> str:
-    operands_a, operands_b = set(metric_a.operand_columns), set(metric_b.operand_columns)
+    operands_a, operands_b = leaf_operands(metric_a), leaf_operands(metric_b)
     filters_a, filters_b = set(metric_a.filter_columns), set(metric_b.filter_columns)
 
     if operands_a == operands_b and metric_a.aggregation != metric_b.aggregation:
@@ -43,8 +64,13 @@ def classify_pattern(metric_a: CanonicalMetric, metric_b: CanonicalMetric,
     if operands_a == operands_b and shape_a and shape_b and shape_a != shape_b:
         if _literals(shape_a) != _literals(shape_b):
             return "THRESHOLD"
-        if "coalesce" in (shape_a + shape_b).lower():
+        if any(fn in (shape_a + shape_b).lower() for fn in NULL_FUNCTIONS):
             return "NULL_HANDLING"
+    # A null rule that differs with everything else equal is a documented null
+    # rule, not a threshold (R-20a).
+    if operands_a == operands_b and shape_a == shape_b and \
+            set(getattr(metric_a, "_null_rules", [])) != set(getattr(metric_b, "_null_rules", [])):
+        return "NULL_HANDLING"
     difference = operands_a.symmetric_difference(operands_b)
     if difference and all(_is_time_column(c) for c in difference):
         return "TIME_BASIS"
@@ -94,6 +120,13 @@ def describe_difference(metric_a: CanonicalMetric, metric_b: CanonicalMetric,
     operands_a, operands_b = set(metric_a.operand_columns), set(metric_b.operand_columns)
     only_a = _short_names(operands_a - operands_b, operands_b - operands_a)
     only_b = _short_names(operands_b - operands_a, operands_a - operands_b)
+    # Where the catalog could not resolve a reference, describe what the report
+    # wrote rather than "none": the steward adjudicates the calculation, the
+    # catalog admin fixes the lineage.
+    leaves_a, leaves_b = leaf_operands(metric_a), leaf_operands(metric_b)
+    if leaves_a != leaves_b and (not only_a or not only_b):
+        only_a = only_a or sorted(leaves_a - leaves_b)
+        only_b = only_b or sorted(leaves_b - leaves_a)
     if pattern == "THRESHOLD":
         lit_a, lit_b = _literals(shape_a), _literals(shape_b)
         return (f"Same columns, different threshold: {', '.join(lit_a) or 'none'} "
@@ -110,6 +143,10 @@ def describe_difference(metric_a: CanonicalMetric, metric_b: CanonicalMetric,
         fa = sorted(c.rsplit(".", 1)[-1] for c in set(metric_a.filter_columns))
         fb = sorted(c.rsplit(".", 1)[-1] for c in set(metric_b.filter_columns))
         return f"Filters differ: {', '.join(fa) or 'none'} versus {', '.join(fb) or 'none'}"
+    if pattern == "NULL_HANDLING":
+        rules_a = ", ".join(getattr(metric_a, "_null_rules", [])) or "none"
+        rules_b = ", ".join(getattr(metric_b, "_null_rules", [])) or "none"
+        return f"Null handling differs: {rules_a} versus {rules_b}"
     if only_a or only_b:
         return (f"Different source columns: {', '.join(only_a) or 'none'} versus "
                 f"{', '.join(only_b) or 'none'}")

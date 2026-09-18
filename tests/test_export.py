@@ -178,11 +178,15 @@ def test_workbook_scores_tab_pairs_every_feature_with_evidence(run, pack):
     # Demand, consolidation and feasibility features are backed by graph rows; the
     # risk features are derived from the candidate itself, and the tab says so
     # rather than leaving the cell blank.
+    # Evidence-required binds per feature, not per candidate (R-22): the risk
+    # features cite the candidate's own rows - its sensitivity class, its grain
+    # ambiguity, its open conflicts - rather than leaving a cell blank. A blank
+    # would mean a weight moved a rank with nothing a reviewer could check.
+    assert any(row[2] == labels.label("dimension", "risk") for row in mine), \
+        "the top candidate has no risk features on the tab"
     for row in mine:
-        if row[2] == labels.label("dimension", "risk"):
-            assert row[12] == "no evidence row for this feature"
-        else:
-            assert row[10] and row[11], f"{row[3]} was written with no evidence"
+        assert row[10] and row[11], f"{row[3]} was written with no evidence"
+        assert row[12] and row[12] != "no evidence row for this feature", row[3]
 
 
 def test_workbook_tabs_without_input_say_so_rather_than_vanish(run):

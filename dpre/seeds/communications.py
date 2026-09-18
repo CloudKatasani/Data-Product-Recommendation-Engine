@@ -377,7 +377,7 @@ def consumer_confirmation(unit: str, rows: list[dict], context: _Context) -> str
             f"- What it is: {candidate.purpose}",
             f"- Your usage: {row['users']} users across {row['reports']} report(s), "
             f"cadence {draft.cadence}",
-            f"- Questions those reports answer today (AI_DRAFT):",
+            "- Questions those reports answer today (AI_DRAFT):",
         ]
         lines += [f"    - {q}" for q in draft.questions]
         lines += [

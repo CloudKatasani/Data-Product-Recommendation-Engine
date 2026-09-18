@@ -18,7 +18,10 @@ from ..models import (
     Candidate, CandidateAttribute, CandidateConsumer, CandidateReport, CandidateSource,
     KnowledgeGraph,
 )
-from ..usage import dominant_cadence, report_weights, scheduled_share
+from ..glossary.terms import term_link_for
+from ..graph.domains import domain_nodes
+from ..score.demand import report_weights
+from ..usage import dominant_cadence, scheduled_share
 from ..util.ids import stable_id
 from ..util.text import title_case
 from .bipartite import Bipartite, build_bipartite, conformed_tables, hub_tables, project
@@ -313,7 +316,7 @@ def _attributes(metrics, graph: KnowledgeGraph) -> list[CandidateAttribute]:
                 column = graph.columns.get(fqn)
                 if column is None:
                     continue
-                seen[fqn] = CandidateAttribute(
+                attribute = CandidateAttribute(
                     column_fqn=fqn, name=column.column_name, role=role,
                     data_type=column.data_type, definition=column.definition,
                     business_term=column.business_term, sensitivity=column.sensitivity,
@@ -321,13 +324,33 @@ def _attributes(metrics, graph: KnowledgeGraph) -> list[CandidateAttribute]:
                     nullable=column.nullable,
                     confidence=round(confidence_by_column.get(fqn, 0.0), 2),
                 )
+                # Catalog trust signals and the glossary term status travel with
+                # the attribute (R-35, R-34); the attribute register reads them.
+                link = term_link_for(graph, fqn)
+                setattr(attribute, "_certification_status", column.certification_status)
+                setattr(attribute, "_quality_score", column.quality_score)
+                setattr(attribute, "_term_status", link.status_class if link else "")
+                setattr(attribute, "_term_id", link.term_id if link else "")
+                seen[fqn] = attribute
     return sorted(seen.values(), key=lambda a: (a.role != "operand", a.name))
 
 
 def _owner_and_steward(metrics, sources: list[CandidateSource],
                        graph: KnowledgeGraph) -> tuple[str, str]:
+    """Owner (accountable) and steward (responsible) as distinct roles (R-44).
+
+    The owner is the owner of the dominant domain (section 9.1), falling back
+    to the majority owner of the source tables. The steward is the majority of
+    the metrics' resolved stewards, counting only stewards the catalog confirmed
+    (a report-owner suggestion never outvotes a catalog steward), then the
+    source tables' stewards. Ties break alphabetically, never by extract order.
+    """
     owners: Counter = Counter()
     stewards: Counter = Counter()
+    suggestions: Counter = Counter()
+    domains = Counter(m.domain for m in metrics if m.domain)
+    dominant = domains.most_common(1)[0][0] if domains else ""
+    node = domain_nodes(graph).get(dominant) if dominant else None
     for source in sources:
         table = graph.tables.get(source.table_fqn)
         if table:
@@ -336,11 +359,21 @@ def _owner_and_steward(metrics, sources: list[CandidateSource],
             if table.steward_id:
                 stewards[table.steward_id] += 1
     for metric in metrics:
-        if metric.steward_id:
-            stewards[metric.steward_id] += 1
-    owner = owners.most_common(1)[0][0] if owners else ""
-    steward = stewards.most_common(1)[0][0] if stewards else ""
+        if not metric.steward_id:
+            continue
+        if metric.steward_source in ("business term steward", "column steward"):
+            stewards[metric.steward_id] += 2
+        else:
+            suggestions[metric.steward_id] += 1
+    owner = node.owner if node and node.owner else _top(owners)
+    steward = _top(stewards) or _top(suggestions)
     return owner, steward
+
+
+def _top(votes: Counter) -> str:
+    if not votes:
+        return ""
+    return sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
 
 def _gaps(candidate: Candidate, metrics, graph: KnowledgeGraph) -> list[str]:
@@ -367,6 +400,23 @@ def _gaps(candidate: Candidate, metrics, graph: KnowledgeGraph) -> list[str]:
     if probable:
         gaps.append(f"{len(probable)} attributes resolved on probable lineage only "
                     "(below 0.80 confidence)")
+    # The glossary is the term of record (R-34): a Draft or Retired term behind
+    # an attribute is a gap the steward must close before the definition is signed.
+    draft = sorted({a.business_term for a in candidate.attributes
+                    if getattr(a, "_term_status", "") == "draft"})
+    if draft:
+        gaps.append(f"{len(draft)} glossary terms in use are still Draft: "
+                    + ", ".join(draft[:5]))
+    retired = sorted({a.business_term for a in candidate.attributes
+                      if getattr(a, "_term_status", "") == "retired"})
+    if retired:
+        gaps.append(f"{len(retired)} glossary terms in use are Deprecated or Retired: "
+                    + ", ".join(retired[:5]))
+    suggested = [m.canonical_name for m in metrics
+                 if m.steward_id and m.steward_source == "most frequent report owner"]
+    if suggested:
+        gaps.append(f"{len(suggested)} metrics carry a report owner as a steward suggestion; "
+                    "no catalog steward confirmed")
     return gaps
 
 

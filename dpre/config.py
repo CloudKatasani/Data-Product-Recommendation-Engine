@@ -42,11 +42,53 @@ QUARANTINE_REASONS = {
 # --------------------------------------------------------------------------
 
 NOMINAL_CONFLICT_LABEL_SIMILARITY = 0.90
+# Functions that change how a number is *displayed* but not what it is. ``int``
+# was removed after review finding R-20b: ``int([days]/30)`` truncates, so a
+# bucketed figure is not the raw ratio and must not fingerprint alike. ``value``
+# and ``convert`` stay because they widen a text or numeric type without
+# rounding; ``convert`` to an integer type is caught in ``expr.py`` instead.
 FORMATTING_FUNCTIONS = {
     "round", "cast", "to_char", "tochar", "format", "currency", "tonumber",
-    "to_number", "convert", "trim", "coalesce_display", "value", "int",
+    "to_number", "convert", "trim", "coalesce_display", "value",
 }
+
+# How a nominal conflict was proposed, stored on the conflict row so a steward
+# can tell an offline token match from a model-scored one (R-18).
+SIMILARITY_METHOD = "offline-token"
+
+# Blocking keys for nominal-conflict candidate generation (R-18). A 12-character
+# label prefix missed 'DSO' against 'Days Sales Outstanding'; a metric now blocks
+# on its expanded label token key, on its operand-column set, and on its
+# glossary term, and every pair the blocks produce is scored.
+CONFLICT_BLOCKING_KEYS = ("label-token", "operand-set", "glossary-term")
+CONFLICT_MIN_SHARED_LABEL_TOKENS = 1
 COMMUTATIVE_OPERATORS = {"+", "*"}
+
+# --------------------------------------------------------------------------
+# Business glossary as the term of record (section 5.1 step 6, finding R-34)
+# --------------------------------------------------------------------------
+
+# A term only counts fully toward definition coverage once it is Approved. A
+# Draft term is half-credit and flagged; a Deprecated or Retired term in use is
+# a gap, because the estate is reporting on a definition the glossary withdrew.
+GLOSSARY_STATUS_CREDIT = {
+    "approved": 1.0, "certified": 1.0, "published": 1.0, "accepted": 1.0,
+    "draft": 0.5, "proposed": 0.5, "in review": 0.5,
+    "deprecated": 0.0, "retired": 0.0, "rejected": 0.0,
+}
+GLOSSARY_DEFAULT_CREDIT = 0.5          # an unlabelled term is treated as Draft
+
+# Stewardship resolution order with the confidence each step carries (R-44).
+# Ownership (accountable) and stewardship (responsible) are different roles: a
+# report owner is never promoted to steward, only suggested as one.
+STEWARD_RESOLUTION_ORDER = (
+    ("glossary term steward", 1.00),
+    ("table steward", 0.85),
+    ("domain steward", 0.70),
+    ("domain owner (escalation)", 0.55),
+    ("report owner (suggestion, not a steward)", 0.30),
+)
+STEWARD_SUGGESTION_SOURCE = "report owner (suggestion, not a steward)"
 TIME_INTELLIGENCE_FUNCTIONS = {
     "sameperiodlastyear": "PY",
     "dateadd": "SHIFT",
@@ -123,6 +165,11 @@ RECENCY_HALF_LIFE_MONTHS = 6.0
 USAGE_WINDOW_MONTHS = 12            # open decision D-01
 DECISION_CRITICAL_USAGE_FLOOR = 0.60  # section 15.1 mitigation
 
+# A six-month half-life punishes a report for running on its own schedule: an
+# annual return last run eleven months ago is not stale, it is on time. The
+# applied half-life is at least twice the report's cadence (R-49).
+RECENCY_CADENCE_MULTIPLE = 2.0
+
 # Hard gates (section 8.3)
 GATE_MIN_USERS_PER_BU = 2
 GATE_LINEAGE_FLOOR = 0.60
@@ -139,11 +186,44 @@ QUALITY_GATES = {
     "stability_jaccard": 0.60,
 }
 
+# A gate has three outcomes, not two. "Not assessed" is neither a pass nor a
+# failure and must never be reported as 1.0 (R-06): the first run in a database
+# has nothing comparable to be stable against.
+GATE_PASS = "pass"
+GATE_FAIL = "fail"
+GATE_NOT_ASSESSED = "not_assessed"
+GATE_OUTCOMES = (GATE_PASS, GATE_FAIL, GATE_NOT_ASSESSED)
+
+# --------------------------------------------------------------------------
+# Extract freshness and input data quality (sections 3 and 11, findings R-32/R-35)
+# --------------------------------------------------------------------------
+
+# Age of the oldest input against the run's as-of date.
+FRESHNESS_WARN_DAYS = 30
+FRESHNESS_FAIL_DAYS = 90
+# Spread between the newest and the oldest input in one bundle. Extracts pulled
+# weeks apart explain orphan KPI rows that look like a lineage defect.
+EXTRACT_DRIFT_WARN_DAYS = 7
+
+# Share of rows a rule may fail before it is reported as failed rather than
+# warned. Duplicate identifiers have no tolerance: one is a defect.
+DQ_RULE_TOLERANCE = 0.0
+DQ_SAMPLE_LIMIT = 10                 # identifiers shown per failing rule
+
 # --------------------------------------------------------------------------
 # Grain backbone (section 4.3)
 # --------------------------------------------------------------------------
 
 CONFORMED_BACKBONE = ["Customer", "Account", "Premise", "Service Point", "Meter"]
+# A date dimension is joined by everything and identifies nothing, so it can
+# never be the coarsest business entity of an estate (R-47).
+BACKBONE_EXCLUDED_TOKENS = {
+    "date", "time", "calendar", "period", "day", "month", "quarter", "year",
+    "week", "fiscal", "datetime", "clock",
+}
+# Grains that describe a load step rather than a business entity. A KPI never
+# inherits one of these, and a table carrying one is reported as ungrained.
+NON_BUSINESS_GRAINS = {"Staging", "Batch", "Load", "Stage", "Landing", "Work"}
 GRAIN_FINENESS = {
     "Customer": 1, "Account": 2, "Premise": 3, "Service Point": 4, "Meter": 5,
     "Event": 9, "Transaction": 8, "unknown": 0,

@@ -39,23 +39,30 @@ HIGHER_IS_BETTER = {
     "top20_coverage": True,
 }
 
-# Produced once by derive_reference_bands(as_of=2026-09-17) over the nine
-# synthetic packs (generic, utility, banking, insurance, retail, healthcare,
+# Produced by derive_reference_bands(as_of=2026-09-17) over the nine synthetic
+# packs (generic, utility, banking, insurance, retail, healthcare,
 # manufacturing, telecom, public_sector) with the default EngineConfig and the
 # generator's fixed seed; low/high are the min and max across packs, median the
-# middle value. Re-derive when the generator or the parser version changes.
+# middle value. Re-derive when the generator, the parser version or a detection
+# rule changes.
+#
+# Re-derived after review finding R-18 tightened conflict detection. Conflict
+# density roughly halved, from a 0.41-0.53 band to 0.22-0.29, because what left
+# the register was never a competing definition: lineage-resolution artefacts
+# and nominal-code collisions. The band has to move with it, or every honest run
+# reads as an outlier against a number that counted noise.
 REFERENCE_BANDS: dict[str, dict[str, float]] = {
-    "duplication_ratio": {"low": 0.7414, "median": 0.759, "high": 0.7719},
-    "conflict_density": {"low": 0.4132, "median": 0.4775, "high": 0.5339},
+    "duplication_ratio": {"low": 0.7414, "median": 0.7607, "high": 0.7719},
+    "conflict_density": {"low": 0.2222, "median": 0.2417, "high": 0.2906},
     "lineage_completeness": {"low": 0.8747, "median": 0.8901, "high": 0.8999},
     "parse_rate": {"low": 0.9371, "median": 0.9418, "high": 0.945},
     "definition_coverage": {"low": 0.2364, "median": 0.2459, "high": 0.258},
     "steward_coverage": {"low": 1.0, "median": 1.0, "high": 1.0},
-    "confirmed_steward_coverage": {"low": 0.7851, "median": 0.8462, "high": 0.8559},
+    "confirmed_steward_coverage": {"low": 0.7833, "median": 0.8448, "high": 0.8571},
     "term_steward_coverage": {"low": 1.0, "median": 1.0, "high": 1.0},
-    "opaque_share": {"low": 0.1776, "median": 0.2018, "high": 0.2124},
+    "opaque_share": {"low": 0.1776, "median": 0.1947, "high": 0.2054},
     "zombie_share": {"low": 0.0189, "median": 0.0304, "high": 0.0442},
-    "top20_coverage": {"low": 0.9187, "median": 0.9511, "high": 0.9756},
+    "top20_coverage": {"low": 0.9258, "median": 0.9489, "high": 0.9725},
 }
 
 # Specification section 14.2 targets that can be read as estate KPIs.

@@ -32,7 +32,7 @@ import hashlib
 import json
 import os
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 Completion = Callable[[str, str], str]

@@ -3,6 +3,13 @@
 Rules ER-1 to ER-6 of specification section 4.2 run in order; the first match
 wins and its confidence is stored on the edge. Anything that resolves below the
 ER-6 floor is quarantined with a reason code and counted against feasibility.
+
+A reviewer-confirmed mapping (``dpre.graph.mappings``, review finding R-46)
+runs before ER-1: a person who looked at the near-miss and agreed is stronger
+evidence than any rule, and the quarantine row that prompted the confirmation
+must not come back on the next run. A quarantined LOW_CONFIDENCE row carries
+its best near-miss as data, not only as prose, so the remediation plan can
+offer "confirm this mapping" as an action.
 """
 from __future__ import annotations
 
@@ -13,6 +20,7 @@ from ..config import (
 )
 from ..models import CatalogColumnRecord, CatalogLineageRecord, KpiRecord
 from ..util.text import embedding_similarity, name_similarity, normalize_identifier, token_key
+from .mappings import MANUAL_CONFIDENCE, MANUAL_RULE
 
 
 @dataclass
@@ -39,11 +47,15 @@ class ResolverIndex:
     table_upstream: dict[str, list[str]] = field(default_factory=dict)
     domain_by_table: dict[str, str] = field(default_factory=dict)
     sor_by_table: dict[str, bool] = field(default_factory=dict)
+    manual: dict[str, str] = field(default_factory=dict)
 
 
 def build_index(columns: list[CatalogColumnRecord],
-                lineage: list[CatalogLineageRecord]) -> ResolverIndex:
+                lineage: list[CatalogLineageRecord],
+                manual_mappings: dict[str, str] | None = None) -> ResolverIndex:
     index = ResolverIndex()
+    for raw, fqn in (manual_mappings or {}).items():
+        index.manual[normalize_identifier(raw)] = fqn
     for record in columns:
         fqn = record.column_fqn
         table_fqn = record.table_fqn
@@ -75,16 +87,32 @@ def _norm_fqn(fqn: str) -> str:
     return normalize_identifier(fqn)
 
 
+Unresolved = tuple[None, str, str, dict]
+
+
 def resolve_reference(kpi: KpiRecord, reference_column: str, index: ResolverIndex,
-                      query_item: str = "") -> Resolution | tuple[None, str, str]:
-    """Resolve one lineage reference. Returns a Resolution or (None, reason, detail)."""
+                      query_item: str = "") -> Resolution | Unresolved:
+    """Resolve one lineage reference.
+
+    Returns a Resolution, or ``(None, reason, detail, suggestion)`` where the
+    suggestion names the best near-miss (``column_fqn``, ``score``) when one
+    exists, so a reviewer can confirm it (R-46).
+    """
     table = kpi.table
     column = reference_column or kpi.column
     if not table or not column:
-        return None, "MISSING_REFERENCE", QUARANTINE_REASONS["MISSING_REFERENCE"]
+        return None, "MISSING_REFERENCE", QUARANTINE_REASONS["MISSING_REFERENCE"], {}
+
+    fqn = ".".join([kpi.source_system, kpi.database, kpi.schema, table, column])
+    # ER-0: a mapping a reviewer confirmed in an earlier run outranks every rule.
+    if index.manual:
+        for key in (normalize_identifier(fqn), normalize_identifier(f"{table}.{column}")):
+            confirmed = index.manual.get(key)
+            if confirmed and confirmed in index.record_by_fqn:
+                return Resolution(confirmed, MANUAL_RULE, MANUAL_CONFIDENCE,
+                                  "mapping confirmed by a reviewer")
 
     # ER-1: exact match on the full physical name after case and quote normalization.
-    fqn = ".".join([kpi.source_system, kpi.database, kpi.schema, table, column])
     hit = index.by_fqn.get(normalize_identifier(fqn))
     if hit:
         return Resolution(hit, "ER-1", ER_CONFIDENCE["ER-1"], "exact physical name")
@@ -101,8 +129,9 @@ def resolve_reference(kpi: KpiRecord, reference_column: str, index: ResolverInde
     if not table_fqns:
         # The Power BI adapter cannot see past an import model's M query.
         if kpi.tool == "powerbi" and getattr(kpi, "_storage_mode", "").lower() == "import":
-            return None, "MODEL_TERMINUS", QUARANTINE_REASONS["MODEL_TERMINUS"]
-        return None, "NO_CATALOG_TABLE", QUARANTINE_REASONS["NO_CATALOG_TABLE"]
+            return None, "MODEL_TERMINUS", QUARANTINE_REASONS["MODEL_TERMINUS"], {}
+        return None, "NO_CATALOG_TABLE", QUARANTINE_REASONS["NO_CATALOG_TABLE"], \
+            _nearest_table(table, index)
 
     # ER-2: exact table match plus column match after alias expansion. The query
     # item alias is expanded to the underlying column via the package metadata.
@@ -168,8 +197,25 @@ def resolve_reference(kpi: KpiRecord, reference_column: str, index: ResolverInde
     if best[1]:
         return None, "LOW_CONFIDENCE", (
             f"{QUARANTINE_REASONS['LOW_CONFIDENCE']} (best {best[0]:.2f} against "
-            f"{best[1].rsplit('.', 1)[-1]})")
-    return None, "NO_CATALOG_COLUMN", QUARANTINE_REASONS["NO_CATALOG_COLUMN"]
+            f"{best[1].rsplit('.', 1)[-1]})"), {"column_fqn": best[1], "score": round(best[0], 3),
+                                                 "method": "embedding similarity"}
+    return None, "NO_CATALOG_COLUMN", QUARANTINE_REASONS["NO_CATALOG_COLUMN"], {}
+
+
+def _nearest_table(table: str, index: ResolverIndex) -> dict:
+    """The catalog table closest by name to one the lineage names but the catalog lacks.
+
+    A renamed or archived table is the usual cause; the suggestion lets the
+    remediation plan say "register X, or confirm it is Y".
+    """
+    best: tuple[float, str] = (0.0, "")
+    for name, fqns in index.tables_by_name.items():
+        score = name_similarity(table, name)
+        if score > best[0]:
+            best = (score, fqns[0])
+    if best[1] and best[0] >= 0.6:
+        return {"table_fqn": best[1], "score": round(best[0], 3), "method": "table name similarity"}
+    return {}
 
 
 def extend_upstream(resolution: Resolution, index: ResolverIndex) -> Resolution:
