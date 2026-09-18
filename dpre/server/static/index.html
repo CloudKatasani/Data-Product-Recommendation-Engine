@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Product Recommendation Engine</title>
+<meta name="description" content="Turns report-level KPI lineage and catalog metadata into a ranked, evidence-backed backlog of data product candidates.">
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128202;</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <strong>Data Product Recommendation Engine</strong>
+    <span>propose-only &middot; evidence-bound &middot; replayable</span>
+  </div>
+  <nav class="tabs" id="tabs" aria-label="Sections">
+    <button data-view="start" aria-current="page">Start</button>
+    <button data-view="backlog">Backlog</button>
+    <button data-view="portfolio">Portfolio</button>
+    <button data-view="conflicts">Conflicts</button>
+    <button data-view="gaps">Gaps</button>
+    <button data-view="ask">Ask</button>
+    <button data-view="runs">Runs</button>
+  </nav>
+  <div class="run-pill" id="run-pill" hidden>
+    <span class="dot"></span><span id="run-pill-text">no run yet</span>
+  </div>
+  <button class="ghost sm" id="theme-toggle" title="Switch theme">Theme</button>
+</header>
+
+<main>
+  <div id="flash"></div>
+
+  <!-- ---------------- Start ---------------- -->
+  <section class="view" id="view-start">
+    <div class="choice">
+      <article>
+        <h2>Manual</h2>
+        <p class="secondary small">You supply the extracts. The engine maps your columns onto
+          the ingestion contract, resolves them into one knowledge graph and runs unchanged.</p>
+        <ul>
+          <li>Cognos rationalization report and KPI lineage report</li>
+          <li>Power BI inventory and DAX measure lineage</li>
+          <li>Collibra metadata, lineage and business glossary</li>
+          <li>Alation metadata as the alternative catalog</li>
+        </ul>
+        <div class="spacer"></div>
+        <button class="primary" data-goto="manual">Upload extracts</button>
+      </article>
+      <article>
+        <h2>Automated</h2>
+        <p class="secondary small">No extracts yet? The engine generates a synthetic pack for
+          your industry with the duplication, conflicting definitions, broken lineage and
+          missing stewards it is built to find - every defect recorded so detection can be
+          measured.</p>
+        <ul>
+          <li>Nine industries from one parameterized model</li>
+          <li>Fixed seed per industry, so a run is reproducible</li>
+          <li>Every row flagged synthetic; never mixed with a real extract</li>
+          <li>The workbook doubles as the ingestion contract</li>
+        </ul>
+        <div class="spacer"></div>
+        <button class="primary" data-goto="automated">Choose an industry</button>
+      </article>
+    </div>
+
+    <!-- Automated panel -->
+    <div class="card" id="panel-automated" hidden>
+      <div class="row between">
+        <h2>Automated &mdash; synthetic data pack</h2>
+        <button class="ghost sm" data-close-panel="automated">Close</button>
+      </div>
+      <p class="secondary small">Pick the industry whose language your estate speaks. Structure,
+        volumes and defect rates are identical across industries; only the source systems,
+        domains, entity names, KPI names and glossary terms change.</p>
+      <div class="industry-grid" id="industry-grid"></div>
+      <div class="row" style="margin-top:14px">
+        <label class="field">Catalog
+          <select id="auto-catalog">
+            <option value="collibra">Collibra</option>
+            <option value="alation">Alation</option>
+          </select>
+        </label>
+        <label class="field">As-of date <input type="date" id="auto-asof"></label>
+        <label class="field">Seed (optional) <input type="number" id="auto-seed" placeholder="per-industry default"></label>
+        <div class="spacer"></div>
+        <button class="ghost" id="btn-download-pack">Download workbook</button>
+        <button class="primary" id="btn-run-automated">Generate and run</button>
+      </div>
+      <div id="automated-status" class="small muted" style="margin-top:10px"></div>
+    </div>
+
+    <!-- Manual panel -->
+    <div class="card" id="panel-manual" hidden>
+      <div class="row between">
+        <h2>Manual &mdash; your extracts</h2>
+        <button class="ghost sm" data-close-panel="manual">Close</button>
+      </div>
+      <p class="secondary small">Drop CSV, TSV, JSON or Excel files. Each table is matched to an
+        input contract and its columns are auto-mapped; correct anything the engine guessed
+        wrong. The KPI lineage extract is the one input the engine cannot run without.</p>
+      <div class="dropzone" id="dropzone">
+        <p><strong>Drop files here</strong> or <button class="sm" id="btn-browse">browse</button></p>
+        <p class="small muted">A single Excel workbook with several tabs works too &mdash; each tab
+          is bound separately.</p>
+        <input type="file" id="file-input" multiple hidden>
+      </div>
+      <div id="manual-files" class="stack" style="margin-top:14px"></div>
+      <div class="row" style="margin-top:14px">
+        <label class="field">Catalog
+          <select id="manual-catalog">
+            <option value="">use whichever was supplied</option>
+            <option value="collibra">Collibra</option>
+            <option value="alation">Alation</option>
+          </select>
+        </label>
+        <label class="field">As-of date <input type="date" id="manual-asof"></label>
+        <div class="spacer"></div>
+        <button class="primary" id="btn-run-manual" disabled>Run the engine</button>
+      </div>
+      <div id="manual-status" class="small muted" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card" id="run-summary" hidden></div>
+  </section>
+
+  <!-- ---------------- Backlog ---------------- -->
+  <section class="view" id="view-backlog" hidden>
+    <div class="card">
+      <div class="row between">
+        <h2>Candidate backlog</h2>
+        <div class="row">
+          <label class="field">Status <select id="filter-status"><option value="">all</option></select></label>
+          <label class="field">Archetype <select id="filter-archetype"><option value="">all</option></select></label>
+          <label class="field">Tier <select id="filter-tier"><option value="">all</option></select></label>
+          <label class="field">Domain <select id="filter-domain"><option value="">all</option></select></label>
+          <label class="field">Search <input id="filter-text" placeholder="name or id" size="16"></label>
+        </div>
+      </div>
+      <div id="backlog-tiles" class="tiles" style="margin-top:12px"></div>
+    </div>
+    <div class="card pad-0">
+      <div class="table-wrap"><table id="backlog-table"></table></div>
+    </div>
+  </section>
+
+  <!-- ---------------- Portfolio ---------------- -->
+  <section class="view" id="view-portfolio" hidden>
+    <div class="grid two">
+      <div class="card">
+        <h2>Coverage curve</h2>
+        <p class="secondary small">Cumulative usage-weighted KPI consumption covered by the top
+          N candidates. The coverage sanity gate needs the top 20 to clear 50%.</p>
+        <div class="chart-host" id="coverage-chart"></div>
+      </div>
+      <div class="card">
+        <h2>Portfolio mix</h2>
+        <div id="portfolio-mix" class="stack"></div>
+      </div>
+    </div>
+    <div class="card pad-0">
+      <div style="padding:14px 18px 0"><h2>Retirement map</h2>
+        <p class="secondary small">Reports by candidate by disposition, with the users affected.</p></div>
+      <div class="table-wrap"><table id="retirement-table"></table></div>
+    </div>
+    <div class="card pad-0">
+      <div style="padding:14px 18px 0"><h2>Conflict heat map</h2>
+        <p class="secondary small">Canonical metrics by number of competing definitions and the
+          usage at stake behind them.</p></div>
+      <div class="table-wrap"><table id="heat-table"></table></div>
+    </div>
+  </section>
+
+  <!-- ---------------- Conflicts ---------------- -->
+  <section class="view" id="view-conflicts" hidden>
+    <div class="card">
+      <h2>Conflict register</h2>
+      <p class="secondary small">Every nominal conflict, with the competing expressions, the
+        reports behind each side and the usage at stake. This is the first artifact a domain
+        steward sees, because unresolved conflicts are the reason two teams will never trust
+        the same number.</p>
+      <div class="row">
+        <label class="field">Reviewer <input id="conflict-reviewer" placeholder="your name"></label>
+        <label class="field">Pattern <select id="filter-pattern"><option value="">all</option></select></label>
+      </div>
+    </div>
+    <div id="conflict-list" class="stack"></div>
+  </section>
+
+  <!-- ---------------- Gaps ---------------- -->
+  <section class="view" id="view-gaps" hidden>
+    <div class="card">
+      <h2>Gap list</h2>
+      <p class="secondary small">What the engine could not resolve, published as a first-class
+        output. These are the catalog gaps that hold candidates at Exploratory.</p>
+      <div id="gap-tiles" class="tiles"></div>
+    </div>
+    <div class="grid two">
+      <div class="card pad-0">
+        <div style="padding:14px 18px 0"><h3>Unresolved lineage rows</h3></div>
+        <div class="table-wrap"><table id="gap-quarantine"></table></div>
+      </div>
+      <div class="card pad-0">
+        <div style="padding:14px 18px 0"><h3>Metrics without a steward</h3></div>
+        <div class="table-wrap"><table id="gap-stewards"></table></div>
+      </div>
+    </div>
+    <div class="card pad-0">
+      <div style="padding:14px 18px 0"><h3>Columns with no business term</h3></div>
+      <div class="table-wrap"><table id="gap-columns"></table></div>
+    </div>
+  </section>
+
+  <!-- ---------------- Ask ---------------- -->
+  <section class="view" id="view-ask" hidden>
+    <div class="card">
+      <h2>Ask the engine</h2>
+      <p class="secondary small">Bound to a semantic view over the engine's own output tables.
+        Raw extracts and warehouse tables are not exposed, and every answer cites the
+        candidate and evidence IDs behind it.</p>
+      <div class="suggestions" id="chat-suggestions"></div>
+      <div class="chat-log" id="chat-log"></div>
+      <form class="row" id="chat-form" style="margin-top:12px">
+        <input id="chat-input" placeholder="Which candidates retire the most Finance reports?" style="flex:1">
+        <button class="primary" type="submit">Ask</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ---------------- Runs ---------------- -->
+  <section class="view" id="view-runs" hidden>
+    <div class="card pad-0">
+      <div style="padding:14px 18px 0"><h2>Runs</h2>
+        <p class="secondary small">Every run stores its extract IDs, weight version and parser
+          version, so it can be reproduced exactly.</p></div>
+      <div class="table-wrap"><table id="runs-table"></table></div>
+    </div>
+    <div class="card" id="run-detail"></div>
+    <div class="card" id="feedback-panel"></div>
+  </section>
+</main>
+
+<div id="drawer-root"></div>
+<script src="/app.js"></script>
+</body>
+</html>

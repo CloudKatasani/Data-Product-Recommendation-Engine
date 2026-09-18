@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-product-recommendation-engine"
+version = "1.0.0"
+description = "Turns report-level KPI lineage and catalog metadata into a ranked, evidence-backed backlog of data product candidates."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+keywords = ["data products", "data mesh", "cognos", "power bi", "collibra", "alation", "lineage"]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pyyaml>=6"]
+
+[project.scripts]
+dpre = "dpre.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dpre*"]
+
+[tool.setuptools.package-data]
+"dpre.server" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]
