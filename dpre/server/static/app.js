@@ -558,7 +558,7 @@ function drawerHeader(data) {
 
   const tabs = el('div', { class: 'drawer-tabs' });
   const panels = {};
-  const names = ['Overview', 'Score', 'Metrics', 'Conflicts', 'Consumers', 'Reports',
+  const names = ['Overview', 'Score', 'Metrics', 'Consumers', 'Reports',
                  'Attributes', 'Sources', 'Critique', 'Decisions', 'Seeds', 'Review'];
   names.forEach((name, index) => {
     const button = el('button', { 'aria-current': index === 0 ? 'true' : 'false',
@@ -631,9 +631,6 @@ function drawerBody(data) {
     { label: '', render: m => m.name_status === 'AI_DRAFT'
         ? el('button', { class: 'sm', onclick: () => acceptName(m.metric_id) }, 'Accept name') : '' },
   ], data.metrics || []);
-
-  panels.Conflicts = el('div', {});
-  paintCandidateConflicts(panels.Conflicts, data.conflicts || []);
 
   panels.Consumers = tableCard([
     { label: 'Business unit', render: c => el('strong', {}, c.business_unit) },
@@ -954,57 +951,6 @@ function renderCoverageChart(curve) {
 
   host.append(el('figcaption', { class: 'small muted' },
     `The top 20 candidates cover ${fmt.pct((curve[Math.min(19, curve.length - 1)] || {}).cumulative_coverage, 1)} of usage-weighted KPI consumption.`));
-}
-
-/* --------------------------------------------- conflicts, on the candidate */
-function paintCandidateConflicts(host, conflicts) {
-  host.innerHTML = '';
-  host.append(el('p', { class: 'secondary small' },
-    'Competing definitions this candidate would have to reconcile. Adjudicating one is a '
-    + 'steward decision, so it is recorded against your reviewer name from the Review tab.'));
-  host.append(tableCard([
-    { label: 'Label', render: c => el('strong', {}, c.label) },
-    { label: 'Pattern', render: c => chip(c.pattern, 'warning') },
-    { label: 'Difference', render: c => el('div', {},
-        el('div', { class: 'small' }, c.difference_summary),
-        el('details', { class: 'raw' },
-          el('summary', {}, 'competing expressions'),
-          el('pre', { style: 'white-space:pre-wrap' },
-            `A  weight ${fmt.num(c.usage_weight_a)} \u00b7 ${(c.reports_a || []).length} reports\n`
-            + `${c.expression_a || '(not captured)'}\n\n`
-            + `B  weight ${fmt.num(c.usage_weight_b)} \u00b7 ${(c.reports_b || []).length} reports\n`
-            + `${c.expression_b || '(not captured)'}`))) },
-    { label: 'Usage at stake', num: true, render: c => fmt.num(c.usage_weight_a + c.usage_weight_b) },
-    { label: 'Stage 6 decision', render: c => el('span', { class: 'small secondary' },
-        c.semantic_model_decision) },
-    { label: 'Steward', render: c => c.steward_id || chip('unassigned', 'warning') },
-    { label: 'Status', render: c => chip(c.resolution_status,
-        c.resolution_status === 'OPEN' ? 'warning' : 'good') },
-    { label: '', render: c => c.resolution_status === 'OPEN'
-        ? el('div', { class: 'row' },
-            el('button', { class: 'sm',
-              onclick: () => resolveConflict(host, conflicts, c, 'RESOLVED') }, 'Mark adjudicated'),
-            el('button', { class: 'sm ghost',
-              onclick: () => resolveConflict(host, conflicts, c, 'DEFERRED') }, 'Defer'))
-        : '' },
-  ], conflicts));
-}
-
-async function resolveConflict(host, conflicts, conflict, status) {
-  if (!state.reviewer) {
-    flash('Adjudicating a conflict requires a named steward. Set your reviewer name on the '
-          + 'Review tab first.', 'error');
-    return;
-  }
-  try {
-    await api(`/api/runs/${state.runId}/conflicts/${conflict.conflict_id}/resolve`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, reviewer: state.reviewer }),
-    });
-    conflict.resolution_status = status;
-    paintCandidateConflicts(host, conflicts);
-    flash(`${conflict.label} marked ${status} by ${state.reviewer}.`, 'ok');
-  } catch (error) { flash(error.message, 'error'); }
 }
 
 /* ------------------------------------------------------------------- gaps */

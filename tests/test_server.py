@@ -52,8 +52,8 @@ def test_static_application_is_served(server):
             assert len(response.read()) > 1000
 
 
-def test_every_navigation_tab_has_a_view_and_conflicts_is_not_one(server):
-    """The register lives on the candidate card, not as a section of its own."""
+def test_the_application_carries_no_conflicts_surface(server):
+    """Conflicts left the browser entirely: no section, and no panel on the card."""
     import re
     base, _ = server
     with urllib.request.urlopen(f"{base}/", timeout=30) as response:
@@ -66,9 +66,12 @@ def test_every_navigation_tab_has_a_view_and_conflicts_is_not_one(server):
 
     with urllib.request.urlopen(f"{base}/app.js", timeout=30) as response:
         script = response.read().decode()
-    assert "renderConflicts" not in script
-    # Adjudication survives the removal, on the candidate card.
-    assert "paintCandidateConflicts" in script and "resolveConflict" in script
+    for gone in ("renderConflicts", "paintCandidateConflicts", "resolveConflict"):
+        assert gone not in script, gone
+    names = re.search(r"const names = \[(.*?)\];", script, re.S).group(1)
+    panels = re.findall(r"^  panels\.(\w+) =", script, re.M)
+    assert re.findall(r"'([^']+)'", names) == panels
+    assert "Conflicts" not in panels
 
 
 def test_reference_endpoints(server):
@@ -189,3 +192,26 @@ def test_multipart_parser_reads_fields_and_files():
     assert parts[0].name == "note" and parts[0].text() == "hello"
     assert parts[1].is_file and parts[1].filename == "a.csv"
     assert parts[1].content.startswith(b"id,name")
+
+
+def test_conflicts_remain_readable_and_resolvable_through_the_api(server):
+    """The register is still produced, cited and adjudicable outside the browser."""
+    base, _ = server
+    runs = get(base, "/api/runs")["runs"]
+    run_id = runs[0]["run_id"] if runs else post(
+        base, "/api/run/automated", {"industry": "utility", "as_of": "2026-09-17"})["run_id"]
+    conflicts = get(base, f"/api/runs/{run_id}/conflicts")["conflicts"]
+    assert conflicts
+    conflict = conflicts[0]
+    assert conflict["difference_summary"] and conflict["semantic_model_decision"]
+    assert conflict["resolution_status"] == "OPEN"
+
+    resolved = post(base, f"/api/runs/{run_id}/conflicts/{conflict['conflict_id']}/resolve",
+                    {"status": "RESOLVED", "reviewer": "priya.silva"})
+    assert resolved["status"] == "RESOLVED"
+    after = get(base, f"/api/runs/{run_id}/conflicts")["conflicts"]
+    updated = next(c for c in after if c["conflict_id"] == conflict["conflict_id"])
+    assert updated["resolution_status"] == "RESOLVED"
+
+    # And the heat map still ranks them by usage at stake.
+    assert get(base, f"/api/runs/{run_id}/portfolio")["conflict_heat_map"]

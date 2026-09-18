@@ -85,6 +85,12 @@ A decision must name a reviewer — propose-only means acceptance is attributabl
 | Defer | status Deferred with a reason |
 | Override | changes archetype, tier, name, grain, owner or steward, and logs the field |
 
+Conflicts are adjudicated through the API or the store rather than the browser:
+`POST /api/runs/{run_id}/conflicts/{conflict_id}/resolve` with a status and a
+named steward, or `Store.resolve_conflict`. The register itself is unchanged —
+it is written on every run, carried into the Stage 6 seed as parameters and open
+decisions, and ranked by usage at stake on the Portfolio tab.
+
 Two further actions matter:
 
 - **Accept a metric name** — an AI-drafted name cannot reach the catalog until a

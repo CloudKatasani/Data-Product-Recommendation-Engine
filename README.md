@@ -101,11 +101,8 @@ at all. A run below the resolution floor publishes only the gap list.
   score with every feature and its evidence rows, metrics, consumers, retirable
   reports, attributes with sensitivity, sources, the critic's findings, the
   drafted decision register, the downloadable seeds, and the review actions.
-  Its **Conflicts** panel is the register for that candidate — competing
-  expressions, usage at stake, the Stage 6 decision each pattern implies, and
-  the steward's adjudication action.
 - **Portfolio** — the coverage curve, the retirement map and the conflict heat
-  map, which is where the whole estate's conflicts are ranked by usage at stake.
+  map, which is where conflicts are ranked by the usage at stake behind them.
 - **Gaps** — unresolved lineage by reason code, columns with no business term,
   metrics with no steward.
 - **Ask** — questions answered from the governed tables, with citations.
