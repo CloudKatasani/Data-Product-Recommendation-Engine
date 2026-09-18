@@ -154,3 +154,68 @@ def test_source_aligned_means_one_system(clustered):
         if candidate.tier == "Source-aligned":
             systems = {s.system for s in candidate.sources if s.system}
             assert len(systems) <= 1
+
+
+def test_a_conflict_is_a_benefit_or_a_cost_but_never_both(clustered, canonical):
+    """R-50: one count used to raise consolidation and raise risk asks a
+    reviewer to read the same signal two ways."""
+    conflicts = {c.conflict_id: c for c in canonical.conflicts}
+    for candidate in clustered.candidates:
+        if not candidate.score or not candidate.conflicts:
+            continue
+        owned = set(candidate.metric_ids)
+        settled = sum(1 for cid in candidate.conflicts
+                      if cid in conflicts
+                      and conflicts[cid].metric_id_a in owned
+                      and conflicts[cid].metric_id_b in owned)
+        spanning = len(candidate.conflicts) - settled
+        features = {f.feature: f for f in candidate.score.features}
+        assert features["conflicts_surfaced"].value == settled
+        # The risk feature is a share of the candidate's metrics, so compare the
+        # count the detail reports rather than the normalised value.
+        assert str(spanning) in features["conflict_load"].detail
+        assert settled + spanning == len(candidate.conflicts)
+
+
+def test_a_run_relative_feature_names_the_denominator_it_used(clustered):
+    """'demand 82' in September cannot be compared with 'demand 82' in October
+    unless the number says what it was divided by (R-50)."""
+    run_relative = {"usage_weight", "consumer_breadth", "reports_retirable",
+                    "variants_collapsed", "conflicts_surfaced"}
+    for candidate in clustered.candidates:
+        if not candidate.score:
+            continue
+        for feature in candidate.score.features:
+            if feature.feature in run_relative:
+                assert feature.reference_basis == "run_relative", feature.feature
+                assert feature.reference > 0 and feature.reference_id
+                assert feature.value <= feature.reference + 1e-6
+            else:
+                assert feature.reference_basis == "absolute", feature.feature
+                assert 0.0 <= feature.value <= 1.0
+
+
+def test_archetype_confidence_is_the_margin_the_specification_defines(clustered):
+    """Section 7.3: the margin over the runner-up, not a blend with the
+    winner's own score."""
+    checked = 0
+    for candidate in clustered.candidates:
+        rationale = getattr(candidate, "_classification_rationale", {}) or {}
+        if len(rationale) < 2:
+            continue
+        if candidate.origin == "entity_master":
+            # Built by hub extraction, not chosen by the rules: the clusterer
+            # already established it is a shared entity.
+            assert candidate.archetype == "Entity Master"
+            assert candidate.archetype_confidence >= 0.9
+            continue
+        ordered = sorted(rationale.values(), reverse=True)
+        winner = rationale.get(candidate.archetype)
+        expected = max(0.0, min(1.0, round(winner - ordered[0], 3))) if winner != ordered[0] \
+            else max(0.0, min(1.0, round(ordered[0] - ordered[1], 3)))
+        assert abs(candidate.archetype_confidence - expected) < 0.002, candidate.candidate_id
+        checked += 1
+        # The card shows the second reading below the threshold, and only there:
+        # a runner-up beside a confidence of 0.9 would contradict itself.
+        assert bool(candidate.archetype_runner_up) == (candidate.archetype_confidence < 0.6)
+    assert checked, "no rule-classified candidate to check"

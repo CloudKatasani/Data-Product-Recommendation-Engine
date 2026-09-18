@@ -266,7 +266,7 @@ dpre/
   server/      HTTP API, identity and request hardening, the browser application
   pipeline.py  the nine agents and the run quality gates
   store.py     the governed output tables
-tests/         373 tests, including the section 14.1 acceptance criteria
+tests/         379 tests, including the section 14.1 acceptance criteria
 ```
 
 ## Tests

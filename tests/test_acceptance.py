@@ -233,3 +233,49 @@ def test_synthetic_rows_are_never_mixed_with_real_ones(as_of):
     assert not report.ok
     assert any(issue.code == "MIXED_SYNTHETIC" for issue in report.errors)
     bundle.kpis[0].synthetic = True
+
+
+def test_a_run_is_tied_to_the_build_that_produced_it(run):
+    """R-52: a finding attributed to 'the engine' is not attributable at all."""
+    result, _store = run
+    manifest = result.manifest
+    assert manifest.engine_version
+    summary = result.summary()
+    assert summary["engine_version"] == manifest.engine_version
+    # engine_build is the commit when the checkout knows it; an installed
+    # package has no git metadata and that is not an error.
+    assert isinstance(manifest.engine_build, str)
+    assert isinstance(manifest.run_by, str)
+
+
+def test_the_release_files_a_client_engineering_lead_looks_for_exist():
+    root = ROOT if "ROOT" in globals() else __import__("pathlib").Path(
+        __file__).resolve().parents[1]
+    for name in ("LICENSE", "CHANGELOG.md", "README.md", "pyproject.toml",
+                 ".github/workflows/ci.yml", "Dockerfile"):
+        assert (root / name).is_file(), name
+    # The package declares itself typed, and the terms match the classifier
+    # rather than contradicting it.
+    assert (root / "dpre" / "py.typed").is_file()
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    licence = (root / "LICENSE").read_text(encoding="utf-8")
+    assert "Proprietary" in pyproject and "proprietary" in licence.lower()
+    assert "Private :: Do Not Upload" in pyproject
+    # The one claim that goes stale silently.
+    assert "dependencies = []" in pyproject
+
+
+def test_the_readme_test_count_matches_the_suite():
+    """A stale number in the README reads as unfinished and undermines the
+    stronger claims beside it (R-52)."""
+    import re
+    import subprocess
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    claimed = re.search(r"tests/\s+(\d+) tests", (root / "README.md").read_text(encoding="utf-8"))
+    assert claimed, "the README should say how many tests there are"
+    out = subprocess.run(["python3", "-m", "pytest", "tests", "--collect-only", "-q"],
+                         cwd=root, capture_output=True, text=True, timeout=300)
+    collected = re.search(r"(\d+) tests? collected", out.stdout)
+    assert collected, out.stdout[-500:]
+    assert int(claimed.group(1)) == int(collected.group(1)), \
+        f"README says {claimed.group(1)}, the suite collects {collected.group(1)}"

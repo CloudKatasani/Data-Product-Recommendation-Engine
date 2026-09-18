@@ -139,7 +139,8 @@ def _score_one(candidate: Candidate, result: CanonicalizationResult, graph: Know
                  feature_weights["demand"]["usage_weight"],
                  "sum over reports of ln(1 + parity-adjusted runs) x users x recency decay, "
                  "half-life max(config, 2 x cadence)"
-                 + _reference(context.max_usage, context.max_usage_ref)))
+                 + _reference(context.max_usage, context.max_usage_ref),
+                 reference=context.max_usage, reference_id=context.max_usage_ref))
     for report in sorted(candidate.reports, key=lambda r: (-weights.get(r.report_id, 0.0),
                                                           r.report_id)):
         d = demand.get(report.report_id)
@@ -159,7 +160,8 @@ def _score_one(candidate: Candidate, result: CanonicalizationResult, graph: Know
     add(_feature("demand", "consumer_breadth", breadth, _log_ratio(breadth, context.max_units),
                  feature_weights["demand"]["consumer_breadth"],
                  "distinct business units using the candidate's metrics, log-scaled"
-                 + _reference(context.max_units, context.max_units_ref)))
+                 + _reference(context.max_units, context.max_units_ref),
+                 reference=context.max_units, reference_id=context.max_units_ref))
     for consumer in units:
         row("consumer_breadth", "business_unit", consumer.business_unit, contributes(
             f"{consumer.users} users across {consumer.report_count} reports", 1.0))
@@ -187,7 +189,8 @@ def _score_one(candidate: Candidate, result: CanonicalizationResult, graph: Know
                  feature_weights["consolidation"]["reports_retirable"],
                  "reports whose every metric this candidate covers, weighted by disposition "
                  "(Retire 1.0, Merge 0.8, Keep 0.5, Migrate 0.3)"
-                 + _reference(context.max_retirable, context.max_retirable_ref)))
+                 + _reference(context.max_retirable, context.max_retirable_ref),
+                 reference=context.max_retirable, reference_id=context.max_retirable_ref))
     covered = [r for r in candidate.reports if r.coverage >= 1.0]
     for report in sorted(covered, key=lambda r: r.report_id):
         row("reports_retirable", "report", report.report_id, contributes(
@@ -201,7 +204,8 @@ def _score_one(candidate: Candidate, result: CanonicalizationResult, graph: Know
                  _log_ratio(variants, context.max_variants),
                  feature_weights["consolidation"]["variants_collapsed"],
                  "KPI rows merged into the candidate's canonical metrics"
-                 + _reference(context.max_variants, context.max_variants_ref)))
+                 + _reference(context.max_variants, context.max_variants_ref),
+                 reference=context.max_variants, reference_id=context.max_variants_ref))
     merged = [m for m in metrics if len(m.kpi_ids) > 1]
     for metric in sorted(merged, key=lambda m: (-len(m.kpi_ids), m.metric_id)):
         row("variants_collapsed", "metric", metric.metric_id, contributes(
@@ -211,21 +215,41 @@ def _score_one(candidate: Candidate, result: CanonicalizationResult, graph: Know
         evidence.append(negative(cid, "variants_collapsed",
                                  f"each of {len(metrics)} metrics comes from a single KPI row"))
 
-    conflicts = len(candidate.conflicts)
-    add(_feature("consolidation", "conflicts_surfaced", conflicts,
-                 _log_ratio(conflicts, context.max_conflicts),
-                 feature_weights["consolidation"]["conflicts_surfaced"],
-                 "nominal conflicts this candidate's metric definitions resolve"
-                 + _reference(context.max_conflicts, context.max_conflicts_ref)))
+    # One conflict count used to enter consolidation as a benefit and risk as a
+    # cost, which asks a reviewer to read the same signal two ways (R-50). They
+    # are different facts. A conflict whose two sides both sit inside this
+    # candidate is settled by building it: one product, one definition. A
+    # conflict with one side outside is not settled by building anything - the
+    # argument outlives the product and somebody still has to adjudicate it.
     conflict_rows = {c.conflict_id: c for c in result.conflicts}
+    owned = set(candidate.metric_ids)
+    resolved_ids, spanning_ids = [], []
     for conflict_id in sorted(candidate.conflicts):
+        conflict = conflict_rows.get(conflict_id)
+        if conflict is None:
+            spanning_ids.append(conflict_id)
+        elif conflict.metric_id_a in owned and conflict.metric_id_b in owned:
+            resolved_ids.append(conflict_id)
+        else:
+            spanning_ids.append(conflict_id)
+    conflicts = len(candidate.conflicts)
+
+    add(_feature("consolidation", "conflicts_surfaced", len(resolved_ids),
+                 _log_ratio(len(resolved_ids), context.max_conflicts),
+                 feature_weights["consolidation"]["conflicts_surfaced"],
+                 f"{len(resolved_ids)} of {conflicts} competing definitions have both sides "
+                 "inside this candidate, so building it settles them"
+                 + _reference(context.max_conflicts, context.max_conflicts_ref),
+                 reference=context.max_conflicts, reference_id=context.max_conflicts_ref))
+    for conflict_id in resolved_ids:
         conflict = conflict_rows.get(conflict_id)
         text = (f"{conflict.pattern}: {conflict.difference_summary}" if conflict
                 else "competing definition to adjudicate")
         row("conflicts_surfaced", "conflict", conflict_id, contributes(text, 1.0))
-    if not candidate.conflicts:
+    if not resolved_ids:
         evidence.append(negative(cid, "conflicts_surfaced",
-                                 f"0 conflicts over {len(metrics)} metrics"))
+                                 f"no conflict has both sides inside this candidate "
+                                 f"({conflicts} over {len(metrics)} metrics)"))
 
     # ---- Feasibility --------------------------------------------------
     lineage, lineage_detail = _lineage_completeness(candidate, metrics, graph)
@@ -336,17 +360,24 @@ def _score_one(candidate: Candidate, result: CanonicalizationResult, graph: Know
         evidence.append(negative(cid, "grain_ambiguity",
                                  f"all {len(metrics)} metrics evaluate at {candidate.grain}"))
 
-    load = min(1.0, conflicts / float(max(1, len(metrics))))
+    # The risk half: what building this candidate does not settle.
+    load = min(1.0, len(spanning_ids) / float(max(1, len(metrics))))
     add(_feature("risk", "conflict_load", load, load, feature_weights["risk"]["conflict_load"],
-                 f"{conflicts} unresolved conflicts over {len(metrics)} metrics; more "
-                 "conflicts means longer steward adjudication"))
-    for conflict_id in sorted(candidate.conflicts):
+                 f"{len(spanning_ids)} of {conflicts} conflicts reach outside this candidate "
+                 f"or are still open, over {len(metrics)} metrics; each is a steward "
+                 "adjudication the product cannot avoid"))
+    for conflict_id in spanning_ids:
         conflict = conflict_rows.get(conflict_id)
         row("conflict_load", "conflict", conflict_id,
             (f"{conflict.pattern}, steward {conflict.steward_id or 'unassigned'}, "
-             f"{conflict.resolution_status}") if conflict else "open conflict")
-    if not candidate.conflicts:
-        evidence.append(negative(cid, "conflict_load", f"0 conflicts over {len(metrics)} metrics"))
+             f"{conflict.resolution_status}; "
+             + ("the other side sits outside this candidate"
+                if conflict.metric_id_a in owned or conflict.metric_id_b in owned
+                else "neither side is settled here")) if conflict else "open conflict")
+    if not spanning_ids:
+        evidence.append(negative(cid, "conflict_load",
+                                 f"every one of {conflicts} conflicts is settled inside this "
+                                 f"candidate ({len(metrics)} metrics)"))
 
     dimensions = _dimension_scores(features)
     composite = (
@@ -381,12 +412,22 @@ def _reference(maximum: float, reference_id: str) -> str:
 
 
 def _feature(dimension: str, name: str, value: float, normalized: float, weight: float,
-             detail: str) -> ScoreFeature:
+             detail: str, reference: float = 0.0, reference_id: str = "") -> ScoreFeature:
+    """One scored feature.
+
+    ``reference`` is the run maximum a run-relative feature was divided by, and
+    ``reference_id`` the candidate that set it. Recording them makes the
+    normalisation choice visible on the card rather than implicit in the number
+    (R-50): a feature with no reference is already a share and compares across
+    runs; one with a reference compares only within its own run.
+    """
     normalized = max(0.0, min(1.0, float(normalized)))
     return ScoreFeature(
         dimension=dimension, feature=name, value=round(float(value), 4),
         normalized=round(normalized, 4), weight=weight,
         contribution=round(100.0 * normalized * weight, 2), detail=detail,
+        reference=round(float(reference), 4), reference_id=reference_id,
+        reference_basis="run_relative" if reference_id else "absolute",
     )
 
 

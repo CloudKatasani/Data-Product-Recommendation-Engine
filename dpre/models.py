@@ -398,6 +398,16 @@ class CandidateAttribute:
 
 @dataclass
 class ScoreFeature:
+    """One feature's contribution to a dimension, with what it was measured against.
+
+    ``reference`` and ``reference_id`` exist because several features are
+    normalised against the best candidate in the same run (review finding
+    R-50). That makes 'demand 82' meaningful within a run and meaningless
+    between two, so the denominator travels with the number instead of being
+    buried in prose: a reader can see that September's 82 was measured against
+    a different maximum from October's.
+    """
+
     dimension: str
     feature: str
     value: float
@@ -405,6 +415,14 @@ class ScoreFeature:
     weight: float
     contribution: float
     detail: str = ""
+    #: The run maximum this feature was normalised against, or 0.0 when the
+    #: feature is already a share and needs no denominator.
+    reference: float = 0.0
+    #: The candidate or object that set that maximum, for a reader to check.
+    reference_id: str = ""
+    #: "run_relative" when the denominator is this run's best candidate,
+    #: "absolute" when the value is a share that means the same in any run.
+    reference_basis: str = "absolute"
 
 
 @dataclass
@@ -534,6 +552,11 @@ class RunManifest:
     finished_at: str = ""
     weight_version: str = ""
     parser_version: str = ""
+    # The build that produced this run, and who asked for it. A finding
+    # attributed to "the engine" is not attributable at all (R-52).
+    engine_version: str = ""
+    engine_build: str = ""
+    run_by: str = ""
     generation_id: str = ""
     synthetic: bool = False
     extract_ids: list[str] = field(default_factory=list)

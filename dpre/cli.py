@@ -42,6 +42,10 @@ def _print_run(result) -> None:
     summary = result.summary()
     print(f"\nRun {summary['run_id']}  ({summary['mode']}, {summary['industry'] or 'manual'}, "
           f"as of {summary['as_of_date']})")
+    build = summary.get("engine_build") or ""
+    print(f"  engine {summary.get('engine_version', '')}"
+          + (f" build {build}" if build else "")
+          + (f"  run by {summary['run_by']}" if summary.get("run_by") else ""))
     print(f"  weights {summary['weight_version']}  parser {summary['parser_version']}  "
           f"published {summary['published']}")
     stats = summary["stats"]
@@ -197,7 +201,11 @@ def cmd_run(args) -> int:
         print(f"\n  executive pack written to {Path(args.pack) / result.run_id} "
               f"({len(paths)} files)")
     if args.json:
-        write_json(args.json, {"summary": result.summary(),
+        write_json(args.json, {"run_id": result.run_id,
+                               "engine_version": result.manifest.engine_version,
+                               "engine_build": result.manifest.engine_build,
+                               "published": result.manifest.published,
+                               "summary": result.summary(),
                                "candidates": [c for c in result.ranked()],
                                "portfolio": result.portfolio})
         print(f"  json written to {args.json}")

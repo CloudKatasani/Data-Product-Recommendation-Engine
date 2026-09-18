@@ -88,7 +88,26 @@ These are judgement calls, made explicitly rather than silently:
 6. **Lineage completeness is counted in rows.** Resolved edges and quarantined
    rows are counted in the same unit — one row of the lineage extract — so gate
    G2 is comparable with the run-level resolution rate.
-7. **Upstream extension stops at the system of record.** ER-3 walks a reporting
+7. **Archetype confidence is the bare margin, and it is usually low.** Section
+   7.3 defines confidence as the margin over the runner-up and says to show
+   both archetypes below 0.6. An earlier version blended the winner's own score
+   into the number, which made a candidate scoring 0.9 on two archetypes look
+   confident when it is the least certain case there is (R-50). With the margin
+   alone, 115 of 130 candidates across the nine packs sit below 0.6 and show a
+   runner-up. That is not a regression: the archetype rules genuinely overlap,
+   and a reviewer should see it rather than have it averaged away.
+8. **A conflict is counted as a benefit or a cost, never both.** The same count
+   used to raise consolidation and raise risk, which asks a reviewer to read one
+   signal two ways (R-50). A conflict with both metrics inside the candidate is
+   settled by building it and counts toward consolidation; one reaching outside
+   is a steward adjudication the product cannot avoid and counts toward risk.
+9. **Run-relative normalisation is declared on the feature.** Usage, consumer
+   breadth, retirable reports, variants collapsed and resolved conflicts are
+   divided by the best candidate in the same run, so they compare within a run
+   and not between two. `ScoreFeature.reference`, `reference_id` and
+   `reference_basis` carry the denominator and the candidate that set it, so
+   the choice is visible on the card rather than implied by the number.
+10. **Upstream extension stops at the system of record.** ER-3 walks a reporting
    view up to its source table, but never into a staging table: a load step is
    not "upstream of the reporting database".
 

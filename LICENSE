@@ -1,0 +1,50 @@
+Data Product Recommendation Engine
+Terms of use
+
+Copyright (c) 2026. All rights reserved.
+
+This software is proprietary. It is made available for use on engagements by
+those the copyright holder has authorised, and for no other purpose. It is not
+published for redistribution, and `pyproject.toml` carries the
+"Private :: Do Not Upload" classifier so a packaging mistake cannot publish it
+to an index by accident.
+
+Permitted, for an authorised user:
+
+  - Running the engine against a client's extracts on an engagement.
+  - Modifying it for that engagement, including adding adapters, industry
+    accelerators and client-specific configuration.
+  - Producing and delivering the artifacts it generates to that client.
+
+Not permitted without written permission:
+
+  - Redistributing the software, in source or compiled form, to anyone outside
+    the authorised users and the client it was licensed for.
+  - Publishing it, or a derivative of it, to a public package index or
+    repository.
+  - Removing the guardrails described below and continuing to present the
+    result as this engine.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+On the guardrails, which a licence cannot enforce but an engagement depends on.
+
+This engine proposes; it does not decide. Every output is a proposal for a
+named human to accept or reject, and the guardrails that make that true are
+structural rather than advisory: no path moves a candidate past Proposed except
+a recorded review decision, no score exists without the evidence rows behind
+it, drafted text stays marked until a human accepts it, and a synthetic run is
+banner-marked wherever it appears.
+
+Removing any of those produces something that looks like this software and is
+not it, and nothing in these terms permits presenting it as this engine.
+
+Figures produced from the shipped value assumptions are illustrative. Read
+docs/assumptions-register.md before quoting one to a client.

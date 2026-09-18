@@ -71,8 +71,12 @@ def classify(candidate: Candidate, result: CanonicalizationResult, graph: Knowle
     winning_score = scores[winner]
     others = sorted(((a, v) for a, v in scores.items() if a != winner), key=lambda kv: -kv[1])
     runner_up, runner_score = others[0]
-    confidence = round(min(1.0, 0.5 * max(0.0, winning_score)
-                           + 0.5 * max(0.0, winning_score - runner_score)), 3)
+    # Specification 7.3 defines confidence as the margin over the runner-up, and
+    # says to show both archetypes below 0.6. Blending the winner's own score in
+    # made a candidate that scored 0.9 on two archetypes look confident when it
+    # was the least certain case there is (R-50). The margin alone is the number
+    # the specification asks for and the one that means what the card claims.
+    confidence = round(max(0.0, min(1.0, winning_score - runner_score)), 3)
 
     tier, tier_confidence = _tier(candidate, metrics, graph)
     return Classification(
@@ -224,13 +228,19 @@ def apply_classification(candidates: list[Candidate], result: CanonicalizationRe
         classification = classify(candidate, result, graph,
                                   reuse_communities=getattr(candidate, "_reuse_communities", 0))
         if candidate.origin == "entity_master":
+            # Built by hub extraction rather than chosen by the archetype rules:
+            # the clusterer already established it is a shared entity, so the
+            # rules' margin is not the relevant evidence.
             candidate.archetype = "Entity Master"
             candidate.archetype_confidence = max(candidate.archetype_confidence, 0.9)
         else:
             candidate.archetype = classification.archetype
             candidate.archetype_confidence = classification.archetype_confidence
+        # Section 7.3 shows the second reading below 0.6, judged on the
+        # confidence the card actually displays. Showing a runner-up beside a
+        # confidence of 0.9 would contradict itself.
         candidate.archetype_runner_up = (
-            classification.runner_up if classification.archetype_confidence < 0.6 else "")
+            classification.runner_up if candidate.archetype_confidence < 0.6 else "")
         candidate.tier = classification.tier
         candidate.tier_confidence = classification.tier_confidence
         setattr(candidate, "_classification_rationale", classification.rationale)

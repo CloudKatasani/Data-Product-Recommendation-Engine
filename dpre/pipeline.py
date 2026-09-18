@@ -81,6 +81,9 @@ class RunResult:
             "published": self.manifest.published,
             "weight_version": self.manifest.weight_version,
             "parser_version": self.manifest.parser_version,
+            "engine_version": self.manifest.engine_version,
+            "engine_build": self.manifest.engine_build,
+            "run_by": self.manifest.run_by,
             "stats": self.manifest.stats,
             "quality_gates": self.manifest.quality_gates,
             "warnings": self.manifest.warnings,
@@ -91,12 +94,14 @@ class RunResult:
 def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
                  store: Store | None = None, previous_run_id: str | None = None,
                  label: str = "", progress: Progress | None = None,
-                 seed_dir: str | Path | None = None, accelerator: bool = True) -> RunResult:
+                 seed_dir: str | Path | None = None, accelerator: bool = True,
+                 run_by: str = "") -> RunResult:
     """Run every agent over one ingested bundle.
 
     ``accelerator`` supplies the industry's conformed backbone and starter
     glossary terms where the client's own extracts are silent; pass False to
-    see the estate exactly as the extracts describe it.
+    see the estate exactly as the extracts describe it. ``run_by`` names who
+    asked for the run, which goes on the manifest and into every export.
     """
     config = config or EngineConfig()
     bundle: ExtractBundle = ingest.bundle
@@ -229,6 +234,7 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
         as_of_date=as_of.isoformat(), started_at=started.isoformat(timespec="seconds"),
         finished_at=_dt.datetime.now().isoformat(timespec="seconds"),
         weight_version=config.weights.weight_version, parser_version=config.parser_version,
+        engine_version=config.engine_version, engine_build=_engine_build(), run_by=run_by,
         generation_id=bundle.generation_id, synthetic=bundle.synthetic,
         extract_ids=[s.get("label") or s.get("path", "") for s in bundle.source_files],
         quality_gates=gates, stats=stats, warnings=warnings,
@@ -300,6 +306,23 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
 
 
 # --------------------------------------------------------------------------
+
+def _engine_build() -> str:
+    """The commit this build came from, when the checkout knows it.
+
+    A run that cannot be tied to the code that produced it cannot be replayed
+    with confidence (R-52). Failure is silent and empty: an installed package
+    has no git metadata, and that is not an error.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=str(Path(__file__).resolve().parent.parent),
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
 
 def _assess(result: RunResult, ingest: IngestResult, store: Store | None) -> dict:
     """The Assessor's findings, as plain dicts for the manifest.
