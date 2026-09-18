@@ -354,10 +354,15 @@ const dropzone = $('#dropzone');
 dropzone.addEventListener('drop', (event) => uploadFiles(event.dataTransfer.files));
 $('#btn-browse').addEventListener('click', () => $('#file-input').click());
 $('#file-input').addEventListener('change', (event) => {
-  const files = event.target.files;
-  /* Clearing the input means picking the same file twice in a row fires a
-     change event the second time too. Without this, a retry after a failed
-     upload does nothing at all and looks like the browser ignored the click. */
+  /* Copy before clearing. input.files is a live FileList: clearing the input
+     empties the very list just captured, so reading it afterwards yields
+     nothing and the upload silently does not happen. Dropping a file was
+     unaffected because a drop carries its own list.
+
+     The clear is still wanted. Without it, picking the same file twice in a
+     row fires no second change event, so a retry after a failure would look
+     like the browser ignored the click. */
+  const files = Array.from(event.target.files || []);
   event.target.value = '';
   uploadFiles(files);
 });

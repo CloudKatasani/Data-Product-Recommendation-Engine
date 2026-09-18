@@ -530,3 +530,28 @@ def test_one_estate_is_read_through_one_catalog(server, tmp_path):
     assert ingest.bundle.catalog in ("collibra", "alation")
     assert any(e.get("status") == "deduplicated" for e in ingest.log), \
         "setting a catalog aside is a decision the run should record"
+
+
+def test_choosing_a_file_through_browse_reads_it_before_clearing_the_input(server):
+    """input.files is a live FileList. Clearing the input empties the very list
+    the handler just captured, so browse uploaded nothing while dropping a file
+    kept working, because a drop carries its own list.
+
+    The clear itself is wanted: without it, picking the same file twice in a
+    row fires no second change event and a retry looks ignored. It just has to
+    happen after the copy.
+    """
+    base, _ = server
+    with urllib.request.urlopen(f"{base}/app.js", timeout=30) as response:
+        script = response.read().decode()
+    handler = script.split("$('#file-input').addEventListener")[1].split("\n});")[0]
+    code = re.sub(r"/\*.*?\*/", "", handler, flags=re.S)
+
+    assert "Array.from(event.target.files" in code, "the list must be copied, not aliased"
+    assert "event.target.value = ''" in code, "the input must still be cleared for a retry"
+    assert code.index("Array.from(event.target.files") < code.index("event.target.value = ''"), \
+        "copy before clearing, or the copy is empty"
+
+    # Dropping a file uses its own list and must not be routed through the input.
+    drop = script.split("dropzone.addEventListener('drop'")[1].split("\n")[0]
+    assert "dataTransfer.files" in drop
