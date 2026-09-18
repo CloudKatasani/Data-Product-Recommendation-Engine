@@ -363,10 +363,12 @@ def build_router(workspace: Workspace) -> list[tuple[str, str, Callable]]:
         return {"outcome": outcome.to_dict()}
 
     def resolve_conflict(_req, match, body):
-        store.resolve_conflict(match.group("run_id"), match.group("conflict_id"),
-                               body.get("status", "RESOLVED"),
-                               body.get("reviewer", ""), body.get("note", ""))
-        return {"conflict_id": match.group("conflict_id"), "status": body.get("status", "RESOLVED")}
+        # Status comes from the ledger's closed vocabulary and a RESOLVED_* verdict
+        # needs a rationale; the store enforces both (specification section 5.3).
+        return store.resolve_conflict(
+            match.group("run_id"), match.group("conflict_id"),
+            body.get("status", ""), body.get("reviewer", ""), body.get("note", ""),
+            authoritative_metric_id=body.get("authoritative_metric_id", ""))
 
     def accept_name(_req, match, body):
         store.accept_metric_name(match.group("run_id"), match.group("metric_id"),

@@ -7,6 +7,7 @@ from pathlib import Path
 from ..canonicalize.grouping import CanonicalizationResult
 from ..models import Candidate, KnowledgeGraph
 from ..util.yamlio import write_yaml
+from .provenance import provenance_block, run_provenance, seed_header
 
 HEADER = (
     "Data Product Factory - Stage 3 Source Discovery (seed)\n"
@@ -17,12 +18,14 @@ HEADER = (
 
 
 def source_inventory(candidate: Candidate, result: CanonicalizationResult,
-                     graph: KnowledgeGraph) -> dict:
+                     graph: KnowledgeGraph, provenance: dict | None = None) -> dict:
     metrics = [result.metrics[m] for m in candidate.metric_ids if m in result.metrics]
     kpi_ids = {k for m in metrics for k in m.kpi_ids}
     quarantined = [q for q in graph.quarantine if q.kpi_id in kpi_ids]
     reasons = Counter(q.reason_code for q in quarantined)
+    provenance = provenance or run_provenance(candidate, graph)
     return {
+        "provenance": provenance_block(provenance),
         "candidate_id": candidate.candidate_id,
         "proposed_name": candidate.proposed_name,
         "sources": [
@@ -62,4 +65,6 @@ def source_inventory(candidate: Candidate, result: CanonicalizationResult,
 
 def write_source_inventory(candidate: Candidate, result: CanonicalizationResult,
                            graph: KnowledgeGraph, path: str | Path) -> Path:
-    return write_yaml(path, source_inventory(candidate, result, graph), header=HEADER)
+    provenance = run_provenance(candidate, graph)
+    return write_yaml(path, source_inventory(candidate, result, graph, provenance),
+                      header=seed_header(HEADER, provenance))

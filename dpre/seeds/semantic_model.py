@@ -12,6 +12,7 @@ from ..canonicalize.grouping import CanonicalizationResult
 from ..models import Candidate, KnowledgeGraph
 from ..util.text import snake_case
 from ..util.yamlio import write_yaml
+from .provenance import provenance_block, run_provenance, seed_header
 
 HEADER = (
     "Data Product Factory - Stage 6 Semantic Model (skeleton)\n"
@@ -22,15 +23,17 @@ HEADER = (
 
 
 def semantic_model(candidate: Candidate, result: CanonicalizationResult,
-                   graph: KnowledgeGraph) -> dict:
+                   graph: KnowledgeGraph, provenance: dict | None = None) -> dict:
     metrics = [result.metrics[m] for m in candidate.metric_ids if m in result.metrics]
     conflicts = [c for c in result.conflicts if c.conflict_id in candidate.conflicts]
     questions = {
         draft.business_unit: draft.questions for draft in candidate.decisions_drafted
     }
+    provenance = provenance or run_provenance(candidate, graph)
 
     dimensions = _dimensions(candidate, metrics, graph)
     return {
+        "provenance": provenance_block(provenance),
         "semantic_model": {
             "name": snake_case(candidate.proposed_name),
             "name_status": candidate.name_status,
@@ -143,4 +146,6 @@ def _questions_for(metric, questions: dict[str, list[str]]) -> list[str]:
 
 def write_semantic_model(candidate: Candidate, result: CanonicalizationResult,
                          graph: KnowledgeGraph, path: str | Path) -> Path:
-    return write_yaml(path, semantic_model(candidate, result, graph), header=HEADER)
+    provenance = run_provenance(candidate, graph)
+    return write_yaml(path, semantic_model(candidate, result, graph, provenance),
+                      header=seed_header(HEADER, provenance))

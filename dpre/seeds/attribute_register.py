@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..models import Candidate
+from ..models import Candidate, KnowledgeGraph
 from ..util.xlsx import write_workbook
+from .provenance import SYNTHETIC_BANNER, run_provenance
 
 COLUMNS = (
     "attribute_name", "role", "business_term", "definition", "source_column",
@@ -36,13 +37,20 @@ def attribute_register_rows(candidate: Candidate) -> list[dict]:
     return rows
 
 
-def write_attribute_register(candidate: Candidate, path: str | Path) -> Path:
+def write_attribute_register(candidate: Candidate, path: str | Path,
+                             graph: KnowledgeGraph | None = None) -> Path:
     rows = attribute_register_rows(candidate)
+    provenance = run_provenance(candidate, graph)
     header = [
         ["Data Product Factory - Stage 5 Attribute Register (seed)"],
         [f"Candidate: {candidate.candidate_id} - {candidate.proposed_name}"],
         ["Allowed values, derivation review and sign-off are for the steward to complete."],
-        [],
+        [f"run_id: {provenance['run_id']}", f"as_of: {provenance['as_of_date']}",
+         f"synthetic: {'TRUE' if provenance['synthetic'] else 'FALSE'}",
+         f"generation_id: {provenance['generation_id']}"],
     ]
+    if provenance["synthetic"]:
+        header.insert(0, [SYNTHETIC_BANNER])
+    header.append([])
     sheet = header + [list(COLUMNS)] + [[row.get(c) for c in COLUMNS] for row in rows]
     return write_workbook(path, {"Attribute Register": sheet})

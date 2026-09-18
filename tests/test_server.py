@@ -207,11 +207,19 @@ def test_conflicts_remain_readable_and_resolvable_through_the_api(server):
     assert conflict["resolution_status"] == "OPEN"
 
     resolved = post(base, f"/api/runs/{run_id}/conflicts/{conflict['conflict_id']}/resolve",
-                    {"status": "RESOLVED", "reviewer": "priya.silva"})
-    assert resolved["status"] == "RESOLVED"
+                    {"status": "RESOLVED_A", "reviewer": "priya.silva",
+                     "note": "definition A is the certified basis"})
+    assert resolved["status"] == "RESOLVED_A"
     after = get(base, f"/api/runs/{run_id}/conflicts")["conflicts"]
     updated = next(c for c in after if c["conflict_id"] == conflict["conflict_id"])
-    assert updated["resolution_status"] == "RESOLVED"
+    assert updated["resolution_status"] == "RESOLVED_A"
+
+    # The closed vocabulary and the rationale requirement are enforced, not advisory.
+    for bad in ({"status": "RESOLVED", "reviewer": "priya.silva", "note": "n"},
+                {"status": "RESOLVED_B", "reviewer": "priya.silva"}):
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            post(base, f"/api/runs/{run_id}/conflicts/{conflict['conflict_id']}/resolve", bad)
+        assert excinfo.value.code == 400
 
     # And the heat map still ranks them by usage at stake.
     assert get(base, f"/api/runs/{run_id}/portfolio")["conflict_heat_map"]

@@ -5,6 +5,8 @@ can fail.
 """
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from dpre.chat import ConversationalAgent
@@ -12,12 +14,13 @@ from dpre.chat.semantic_view import (
     ALLOWED_OBJECTS, FORBIDDEN_OBJECTS, QUERIES, SemanticViewError, check_query,
 )
 from dpre.config import ENGINE_MAX_STATUS, QUALITY_GATES
+from dpre.governance import TransitionError
 from dpre.ingest import ingest_automated
 from dpre.models import ReviewDecision
 from dpre.pipeline import run_pipeline
-from dpre.review import review
+from dpre.review import accept_with_exception, review
 from dpre.seeds import build_seeds
-from dpre.store import EvidenceMissingError, ProposeOnlyError
+from dpre.store import EvidenceMissingError, GateError, ProposeOnlyError
 
 
 def test_a_run_is_reproducible_from_its_stored_inputs(as_of):
@@ -35,7 +38,7 @@ def test_a_run_is_reproducible_from_its_stored_inputs(as_of):
 
 def test_no_code_path_but_a_review_decision_moves_a_candidate_past_proposed(run):
     result, store = run
-    candidate = result.ranked()[0]
+    candidate = next(c for c in result.ranked() if c.status == "Proposed")
     candidate.status = "Accepted"
     with pytest.raises(ProposeOnlyError):
         store.save_candidates(result.run_id, [candidate])
@@ -45,11 +48,62 @@ def test_no_code_path_but_a_review_decision_moves_a_candidate_past_proposed(run)
         store.record_decision(ReviewDecision(
             candidate_id=candidate.candidate_id, decision="Accept", reason_code="x",
             reviewer="", decided_at="", run_id=result.run_id))
+    assert store.orphan_statuses(result.run_id) == []
 
     outcome = review(store, result.run_id, candidate.candidate_id, "Accept",
                      "priya.silva", reason_code="retires_reports")
     assert outcome.status == "Accepted"
     assert ENGINE_MAX_STATUS == "Proposed"
+    # The decision behind the status is on the chain, with its before and after.
+    row = store.decisions(result.run_id)[0]
+    assert row["previous_status"] == "Proposed" and row["new_status"] == "Accepted"
+    assert row["row_hash"] and store.verify_audit_chain(result.run_id)["ok"]
+    assert store.status_history(result.run_id, candidate.candidate_id)[-1]["actor"] == "priya.silva"
+
+
+def test_a_gated_candidate_cannot_be_accepted_without_an_exception_row(run):
+    """Section 8.3: gates no weight can override also bind at acceptance."""
+    result, store = run
+    blocked = next(c for c in result.candidates if c.status == "Blocked")
+    with pytest.raises(GateError, match="G4"):
+        review(store, result.run_id, blocked.candidate_id, "Accept", "priya.silva",
+               reason_code="value_clear")
+    with pytest.raises(GateError):
+        accept_with_exception(store, result.run_id, blocked.candidate_id, "priya.silva",
+                              "G4", "we will migrate later", "cdo.office")
+    assert store.candidate(result.run_id, blocked.candidate_id)["status"] == "Blocked"
+
+    exploratory = next(c for c in result.candidates if c.status == "Exploratory")
+    failed = [g.gate for g in exploratory.score.gates if not g.passed]
+    with pytest.raises(GateError):
+        review(store, result.run_id, exploratory.candidate_id, "Accept", "priya.silva",
+               reason_code="value_clear")
+    with pytest.raises(GateError, match="different person"):
+        accept_with_exception(store, result.run_id, exploratory.candidate_id, "priya.silva",
+                              ",".join(failed), "pilot domain exception", "priya.silva")
+    outcome = accept_with_exception(store, result.run_id, exploratory.candidate_id, "priya.silva",
+                                    ",".join(failed), "pilot domain exception", "cdo.office")
+    assert outcome.status == "Accepted"
+    waiver = next(w for w in store.open_waivers(result.run_id)
+                  if w["candidate_id"] == exploratory.candidate_id)
+    assert waiver["gate_waived"] == ",".join(failed) and waiver["second_approver"] == "cdo.office"
+    assert outcome.row["gate_waived"] == waiver["gate_waived"]
+
+
+def test_the_audit_trail_is_append_only_and_reversals_are_attributed(run):
+    result, store = run
+    accepted = store.candidates(result.run_id, "Accepted")[0]
+    decision_id = store.decisions(result.run_id)[0]["decision_id"]
+    with pytest.raises(sqlite3.IntegrityError):
+        store.connection.execute("DELETE FROM REVIEW_DECISION WHERE decision_id = ?", (decision_id,))
+    with pytest.raises(TransitionError):
+        review(store, result.run_id, accepted["candidate_id"], "Reject", "priya.silva",
+               reason_code="too_small")
+    with pytest.raises(TransitionError, match="different actor"):
+        review(store, result.run_id, accepted["candidate_id"], "Reverse",
+               store.decisions(result.run_id)[0]["reviewer"] if False else "priya.silva",
+               reason_code="decided_in_error")
+    assert store.verify_audit_chain(result.run_id)["ok"]
 
 
 def test_a_score_row_without_evidence_cannot_be_written(run):
@@ -119,7 +173,7 @@ def test_a_seeded_decision_register_needs_only_the_blocked_decision(run):
 
 
 def test_the_conflict_register_is_complete_enough_to_sign_off(run):
-    result, _store = run
+    result, store = run
     conflicts = result.canonical.conflicts
     assert conflicts, "the pilot domain must produce a conflict register"
     for conflict in conflicts:
@@ -128,6 +182,16 @@ def test_the_conflict_register_is_complete_enough_to_sign_off(run):
         assert conflict.usage_weight_a >= 0 and conflict.usage_weight_b >= 0
         assert conflict.semantic_model_decision
         assert conflict.resolution_status == "OPEN"
+    # A steward's sign-off is a ledgered act: closed vocabulary, rationale, audit row.
+    first = conflicts[0]
+    with pytest.raises(ValueError):
+        store.resolve_conflict(result.run_id, first.conflict_id, "RESOLVED", "steward.a", "x")
+    signed = store.resolve_conflict(result.run_id, first.conflict_id, "RESOLVED_A", "steward.a",
+                                    note="A is the definition the regulator sees")
+    assert signed["authoritative_metric_id"] == first.metric_id_a
+    assert store.conflict_decisions(signed["conflict_key"])[0]["steward"] == "steward.a"
+    assert any(d["subject_type"] == "conflict" and d["candidate_id"] == first.conflict_id
+               for d in store.decisions(result.run_id))
 
 
 def test_run_quality_gates_are_all_evaluated(run):

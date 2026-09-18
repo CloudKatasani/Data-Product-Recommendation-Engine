@@ -6,6 +6,7 @@ from pathlib import Path
 from ..canonicalize.grouping import CanonicalizationResult
 from ..models import Candidate, KnowledgeGraph
 from ..util.yamlio import write_yaml
+from .provenance import provenance_block, run_provenance, seed_header
 
 HEADER = (
     "Data Product Factory - Stage 2 Charter (draft)\n"
@@ -16,16 +17,19 @@ HEADER = (
 
 
 def charter_draft(candidate: Candidate, result: CanonicalizationResult,
-                  graph: KnowledgeGraph) -> dict:
+                  graph: KnowledgeGraph, provenance: dict | None = None) -> dict:
     metrics = [result.metrics[m] for m in candidate.metric_ids if m in result.metrics]
     score = candidate.score
+    provenance = provenance or run_provenance(candidate, graph)
     return {
+        "provenance": provenance_block(provenance),
         "charter": {
             "candidate_id": candidate.candidate_id,
             "proposed_name": candidate.proposed_name,
             "name_status": candidate.name_status,
             "purpose": candidate.purpose,
             "purpose_status": "AI_DRAFT",
+            "ai_provenance": (candidate.narrative.get("provenance", {}) or {}).get("purpose", {}),
             "archetype": candidate.archetype,
             "archetype_confidence": candidate.archetype_confidence,
             "archetype_alternative": candidate.archetype_runner_up or None,
@@ -78,4 +82,6 @@ def charter_draft(candidate: Candidate, result: CanonicalizationResult,
 
 def write_charter(candidate: Candidate, result: CanonicalizationResult, graph: KnowledgeGraph,
                   path: str | Path) -> Path:
-    return write_yaml(path, charter_draft(candidate, result, graph), header=HEADER)
+    provenance = run_provenance(candidate, graph)
+    return write_yaml(path, charter_draft(candidate, result, graph, provenance),
+                      header=seed_header(HEADER, provenance))
