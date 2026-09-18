@@ -330,3 +330,45 @@ def test_the_documents_name_the_real_entry_points():
     assert "EMBED_TEXT_768" in snowflake_doc and "GRANT" in snowflake_doc
     demo = (docs / "demo-script.md").read_text(encoding="utf-8")
     assert "Planted_Defects" in demo and "run automated" in demo
+
+
+def test_the_accelerator_fills_glossary_gaps_without_overwriting_the_client(as_of):
+    """R-38: starter terms are marked Starter and carry no steward, so nothing
+    the accelerator supplies can be mistaken for something the client agreed."""
+    from dpre.ingest import ingest_automated
+    from dpre.pipeline import run_pipeline
+
+    plain = run_pipeline(ingest_automated("utility", as_of=as_of), accelerator=False)
+    assisted = run_pipeline(ingest_automated("utility", as_of=as_of), accelerator=True)
+
+    def terms(result):
+        glossary = result.graph.glossary
+        return list(glossary.values()) if isinstance(glossary, dict) else list(glossary)
+
+    before, after = terms(plain), terms(assisted)
+    assert len(after) > len(before)
+    starter = [t for t in after if (t.status or "") == "Starter"]
+    assert starter
+    assert all(not (t.steward or "").strip() for t in starter), \
+        "naming a steward would be a decision nobody took"
+
+    # A term the client already defines is never replaced.
+    client_terms = {t.term.casefold(): t.definition for t in before}
+    for term in after:
+        if term.term.casefold() in client_terms and (term.status or "") != "Starter":
+            assert term.definition == client_terms[term.term.casefold()]
+
+
+def test_the_accelerator_supplies_the_conformed_backbone(as_of):
+    from dpre.accelerators import backbone_for_industry
+    from dpre.ingest import ingest_automated
+    from dpre.pipeline import run_pipeline
+
+    result = run_pipeline(ingest_automated("utility", as_of=as_of), accelerator=True)
+    backbone = backbone_for_industry("utility")
+    grains = {c.grain for c in result.candidates}
+    # Every candidate lands on a business entity the accelerator recognises, or
+    # on one of the engine's own non-backbone grains; none lands on a load step.
+    assert grains
+    assert not grains & {"Staging", "Batch", "Load", "Stage", "Landing", "Work"}
+    assert backbone[0] == "Customer"

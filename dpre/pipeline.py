@@ -91,7 +91,13 @@ class RunResult:
 def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
                  store: Store | None = None, previous_run_id: str | None = None,
                  label: str = "", progress: Progress | None = None,
-                 seed_dir: str | Path | None = None) -> RunResult:
+                 seed_dir: str | Path | None = None, accelerator: bool = True) -> RunResult:
+    """Run every agent over one ingested bundle.
+
+    ``accelerator`` supplies the industry's conformed backbone and starter
+    glossary terms where the client's own extracts are silent; pass False to
+    see the estate exactly as the extracts describe it.
+    """
     config = config or EngineConfig()
     bundle: ExtractBundle = ingest.bundle
     as_of = bundle.as_of_date
@@ -123,9 +129,34 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
             "seconds": 0.0,
         })
 
+    # ---- accelerator content ------------------------------------------
+    # The industry accelerator supplies what a client has not agreed yet: the
+    # conformed backbone for this kind of estate, and starter definitions for
+    # terms their glossary leaves blank. A client's own term always wins, and
+    # what the accelerator adds carries the Starter status so a card can say the
+    # definition is ours, not theirs (R-38).
+    terms_added = 0
+    backbone = None
+    if accelerator and bundle.industry:
+        from .accelerators import backbone_for_industry, merge_starter_glossary, normalize_key
+        try:
+            key = normalize_key(bundle.industry)
+        except KeyError:
+            key = ""
+        if key:
+            backbone = backbone_for_industry(key)
+            terms_added = merge_starter_glossary(bundle, key)
+
     # ---- Resolver -----------------------------------------------------
     t0 = time.time()
-    graph = build_graph(bundle)
+    graph = build_graph(bundle, backbone=backbone)
+    if terms_added:
+        agent_log.append({
+            "agent": "Ingestor",
+            "note": f"{terms_added} starter glossary term(s) supplied by the "
+                    f"{bundle.industry} accelerator, marked Starter and unowned",
+            "rows": terms_added, "seconds": 0.0,
+        })
     step("Resolver", f"{graph.stats['edges']} KPI-column edges, "
                      f"{graph.stats['quarantined_rows']} quarantined, "
                      f"resolution rate {graph.stats['resolution_rate']:.2%}", t0,

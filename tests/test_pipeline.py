@@ -17,8 +17,18 @@ AS_OF = _dt.date(2026, 9, 17)
 def test_every_agent_reports(run):
     result, _store = run
     agents = [entry["agent"] for entry in result.manifest.agent_log]
-    assert agents == ["Ingestor", "Resolver", "Canonicalizer", "Clusterer", "Scorer",
-                      "Narrator", "Critic", "Programme", "Assessor"]
+    # An agent may file more than one note - the Ingestor reports carried-forward
+    # overrides and accelerator terms separately from its row counts - so the
+    # charter is the order the agents first appear in, not the row count.
+    order, seen = [], set()
+    for agent in agents:
+        if agent not in seen:
+            order.append(agent)
+            seen.add(agent)
+    assert order == ["Ingestor", "Resolver", "Canonicalizer", "Clusterer", "Scorer",
+                     "Narrator", "Critic", "Programme", "Assessor"]
+    # Nothing files a note under an agent that never ran.
+    assert seen == set(order)
     assert all(entry["seconds"] >= 0 for entry in result.manifest.agent_log)
     assert all(entry["note"] for entry in result.manifest.agent_log)
 

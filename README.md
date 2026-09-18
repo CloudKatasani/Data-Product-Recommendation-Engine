@@ -42,7 +42,9 @@ metrics (hundreds), not on reports (tens of thousands).
 ## What it does, in order
 
 ```
-extracts ──▶ Ingestor ──▶ Resolver ──▶ Canonicalizer ──▶ Clusterer ──▶ Scorer ──▶ Narrator ──▶ Critic ──▶ human gate
+extracts ──▶ Ingestor ──▶ Resolver ──▶ Canonicalizer ──▶ Clusterer ──▶ Scorer ──▶ Narrator ──▶ Critic
+                                                                                            │
+                                    human gate ◀── Assessor ◀── Programme ◀──────────────────┘
 ```
 
 1. **Ingestor** lands the extracts, validates required fields, reconciles row
@@ -68,6 +70,14 @@ extracts ──▶ Ingestor ──▶ Resolver ──▶ Canonicalizer ──▶
    unit — marked `AI_DRAFT`, with the blocked decision left for a human.
 7. **Critic** checks each candidate against the gates and the DPF Stage 1–2 exit
    criteria and lists what a reviewer will reject.
+8. **Programme** prices and sequences what the others found: build effort with
+   its drivers, benefit attributed once across the estate rather than claimed
+   twice, payback and three-year net present value, delivery waves that respect
+   dependencies, and a RAID log. A board cannot sequence work it cannot price.
+9. **Assessor** measures the run rather than the estate. Data quality of the
+   inputs by dimension, how much of what was planted the engine actually found,
+   the remaining gaps as units with an owner, the metrics awaiting a steward,
+   and what the ranking is blind to.
 
 Then a human accepts, rejects, merges, splits or defers — and that decision is
 the only thing that can move a candidate past `Proposed`.
@@ -82,11 +92,17 @@ the only thing that can move a candidate past `Proposed`.
 | No raw access from chat | The conversational surface picks a *named* query from a whitelist; it never composes SQL, and write verbs and non-whitelisted objects are refused |
 | Catalog remains the record | The engine writes a proposal payload for a steward to import; it never writes to Collibra or Alation |
 | Sensitivity carried, never dropped | Column sensitivity propagates into the risk score and onto the card; PII columns are listed |
-| Replayability | Every run stores extract ids, weight version, parser version and generation id; the same inputs produce the same ranking |
+| Replayability | Every run stores extract ids, file digests, the full clustering configuration and its hash, the weight version, the parser version and the generation id; the same inputs produce the same ranking |
+| Gates bind at acceptance | A `Blocked` candidate cannot be Accepted at all; an `Exploratory` one needs a recorded consumer confirmation or an `AcceptWithException` naming the gate, the rationale and a second approver |
+| Tamper-evident trail | Every decision row is hash-chained to the one before it and the ledgers refuse `UPDATE` and `DELETE`; `dpre audit` recomputes the chain and names the first row that does not verify |
+| Identity is authenticated, never asserted | The reviewer is the principal the server resolved through single sign-on, a bearer token or a loopback development name — never a string in a request body |
+| Decisions outlive the run | A confirmed consumer, an adjudicated conflict, an accepted metric name and a report marked decision-critical are keyed by lineage and re-applied to the next run |
+| A benefit claimed once | A report retired by two candidates is a saving once; the portfolio figure is attributed across the estate, and the gross claim is shown beside it |
 
-Run quality gates (ingest reconciliation, resolution rate ≥ 0.80, parse rate
-≥ 0.70, top-20 coverage ≥ 50%, stability ≥ 85%) decide whether a run publishes
-at all. A run below the resolution floor publishes only the gap list.
+Run quality gates (extract freshness, ingest reconciliation, resolution rate
+≥ 0.80, parse rate ≥ 0.70, top-20 coverage ≥ 50%, stability ≥ 85%) decide
+whether a run publishes at all. A run below the resolution floor publishes only
+the gap list.
 
 ## Using it
 
@@ -106,7 +122,15 @@ at all. A run below the resolution floor publishes only the gap list.
 - **Gaps** — unresolved lineage by reason code, columns with no business term,
   metrics with no steward.
 - **Ask** — questions answered from the governed tables, with citations.
-- **Runs** — every run, its gates, and the feedback loop.
+- **Runs** — whether this run can be trusted, first: the decision chain
+  recomputed, the gate waivers in force, whether the weight vector has council
+  approval, the quality of what the engine was fed, what it missed against what
+  was planted, and what to fix before the next run. Then every run, its gates
+  and the feedback loop.
+
+Sign in before deciding anything. On a loopback instance a name is enough; a
+deployed instance takes the identity from single sign-on and refuses to start
+on a public address without one.
 
 ### The command line
 
@@ -122,6 +146,47 @@ python3 -m dpre review CAND-XXXXXXXX Accept --reviewer "priya.silva" --reason re
 python3 -m dpre ask "which candidates retire the most Finance reports"
 python3 -m dpre feedback --approve "data product council"
 ```
+
+The engine proposes a backlog; a programme is what a client buys. These answer
+the questions asked between review sessions:
+
+```bash
+python3 -m dpre status                  # against the section 14.2 measures, with a RAG
+python3 -m dpre waves --why             # what ships when, and why it sits there
+python3 -m dpre value                   # benefit, build cost, payback, NPV
+python3 -m dpre raid --severity high    # the risk log, or --csv for the steering pack
+python3 -m dpre assess --bias           # inputs, detection, gaps, and the blind spots
+python3 -m dpre audit                   # the decision chain and the open exceptions
+python3 -m dpre benefits                # planned against realised, after acceptance
+```
+
+And these are the governance surfaces a client's audit function asks for:
+
+```bash
+python3 -m dpre reasons                             # the decision and reason-code vocabulary
+python3 -m dpre weights                             # versions, and who approved which
+python3 -m dpre weights --approve v1.1 --approver "cdo.office"
+python3 -m dpre confirm CAND-XXXXXXXX --business-unit "Retail Credit Risk" \
+    --blocked-decision "weekly provisioning sign-off" --latency "next business day" \
+    --consequence "the provision is set on last week's exposures" --confirmed-by "maria.chen"
+python3 -m dpre registers controls --detail          # 24 controls, each verified in code
+python3 -m dpre registers decisions                  # D-01..D-08, and what the engine assumes
+python3 -m dpre registers assumptions                # every contestable figure, and its file
+python3 -m dpre registers traceability               # exit criteria and falsifiers
+python3 -m dpre engagement create --client "Acme Utilities" --cut-date 2026-09-17 ...
+python3 -m dpre scope --engagement ENG-XXXXXXXX --industry utility
+```
+
+A run can also produce the pack itself:
+
+```bash
+python3 -m dpre run automated --industry banking \
+    --pack out/packs --client "Northwind Bank" --partner "A. Partner"
+```
+
+That writes an executive summary in Markdown and HTML, a backlog workbook and a
+printable dossier per candidate, cut in the same process as the run so the cover
+and the store cannot disagree. A synthetic run is banner-marked on every page.
 
 ### As a library
 
@@ -190,10 +255,18 @@ dpre/
   portfolio/   coverage curve, retirement map, conflict heat map
   chat/        semantic view and the conversational agent
   synth/       the parameterized generator and the nine industry packs
-  server/      HTTP API and the browser application
-  pipeline.py  the seven agents and the run quality gates
+  accelerators/ curated backbone, KPI dictionary, personas and starter glossary per industry
+  governance/  the ledgers, the status machine, the hash chain, the audit report
+  programme/   effort, dependencies, delivery waves, the RAID log, the status report
+  value/       the benefit model and the assumption register behind every figure
+  quality/     input data quality, measured detection, remediation, stewardship, bias
+  engagement/  whose estate this is, the agreed scope, branding, the extract request pack
+  registers/   assumptions, open decisions D-01..D-08, controls, RACI, traceability
+  export/      the executive pack, the backlog workbook, the per-candidate dossiers
+  server/      HTTP API, identity and request hardening, the browser application
+  pipeline.py  the nine agents and the run quality gates
   store.py     the governed output tables
-tests/         136 tests, including the section 14.1 acceptance criteria
+tests/         373 tests, including the section 14.1 acceptance criteria
 ```
 
 ## Tests
@@ -208,6 +281,14 @@ moves a candidate past `Proposed`; no score can be written without evidence; the
 conversational agent cannot reach outside its semantic view; AI-drafted names
 are marked everywhere they appear; a seeded decision register needs only the
 blocked decision; and each planted defect class is actually detected.
+
+It also covers the things that make the output defensible: a gated candidate is
+refused at acceptance rather than at scoring; an altered decision row breaks the
+hash chain and the audit names it; a reviewer's confirmation survives into the
+next run on its lineage id; every one of the twenty-four controls in the matrix
+is present in the code; and the detection scorecard reports recall per defect
+class with the misses named, so a regression in a detection rule fails a test
+rather than quietly shrinking a claim.
 
 ## Deliberate limitations
 
@@ -224,3 +305,15 @@ blocked decision; and each planted defect class is actually detected.
   deterministically. With no model configured the engine uses templates, so runs
   stay reproducible offline; `dpre.narrate.ai.register_provider` swaps in Cortex
   `AI_COMPLETE` or any other completion function.
+- **Every money figure is illustrative until the client's own rates replace
+  them.** The value model ships mid-market assumptions, versioned, and the RAID
+  log carries an entry saying so. Read
+  [`docs/assumptions-register.md`](docs/assumptions-register.md) before quoting
+  a number.
+- **The ranking has known blind spots, and they are written down.**
+  `dpre assess --bias` lists seven, with the mechanism, who it disadvantages and
+  the mitigation in the code — including the one that has none.
+- **This is not the target runtime.** It is standard-library Python so it runs
+  anywhere; [`docs/snowflake-cortex-migration.md`](docs/snowflake-cortex-migration.md)
+  names each seam, what it costs to cross, and the grants that re-establish the
+  append-only trail on the platform.

@@ -566,6 +566,19 @@ def cmd_assess(args) -> int:
     return 0
 
 
+def _sole_active_engagement(connection) -> str:
+    """The engagement id when exactly one is active, else empty.
+
+    Most engagements run one at a time, and making somebody paste an id they
+    have just been shown is the kind of friction that ends with runs nobody
+    attached. Two active engagements is ambiguous, so it asks.
+    """
+    from .engagement import list_engagements
+
+    active = list_engagements(connection, status="active")
+    return active[0]["engagement_id"] if len(active) == 1 else ""
+
+
 def cmd_engagement(args) -> int:
     """Create, list, show or close an engagement, and attach a run to one.
 
@@ -615,7 +628,13 @@ def cmd_engagement(args) -> int:
 
     if args.action == "attach":
         run_id = _run_or_latest(store, args.run)
-        outcome = attach_run(connection, run_id, args.engagement, attached_by=args.actor or "")
+        engagement_id = args.engagement or _sole_active_engagement(connection)
+        if not engagement_id:
+            print("name the engagement with --engagement; there is not exactly one active",
+                  file=sys.stderr)
+            store.close()
+            return 1
+        outcome = attach_run(connection, run_id, engagement_id, attached_by=args.actor or "")
         print(f"run {run_id} attached to {outcome['engagement_id']}")
         store.close()
         return 0
@@ -1100,7 +1119,8 @@ def build_parser() -> argparse.ArgumentParser:
 #: charter forbids should read the sentence that explains it, not a traceback.
 REFUSALS = ("GateError", "TransitionError", "ReasonCodeError", "OverrideValueError",
             "ProposeOnlyError", "EvidenceMissingError", "PublishError", "WeightVersionError",
-            "RunExistsError", "ConflictStatusError")
+            "RunExistsError", "ConflictStatusError", "EngagementError", "DecisionError",
+            "VerdictError")
 
 
 def main(argv: list[str] | None = None) -> int:
