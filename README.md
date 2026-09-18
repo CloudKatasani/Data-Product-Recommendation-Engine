@@ -5,8 +5,12 @@ evidence-backed backlog of data product candidates. Each candidate is named by
 the decision it serves, the reports it would retire and the metric conflicts it
 resolves. **Humans approve; the engine only proposes.**
 
-It implements the specification in [`docs/specification.md`](docs/specification.md),
-and it runs two ways:
+It implements the charter in [`docs/specification.md`](docs/specification.md).
+[`SPECIFICATION.md`](SPECIFICATION.md) is the build specification: what the
+system does, the rules it enforces, the constants it runs on and the order to
+build it in, written so the whole thing can be rebuilt from that one document.
+
+It runs two ways:
 
 | Path | What you supply | What happens |
 | --- | --- | --- |
@@ -266,7 +270,7 @@ dpre/
   server/      HTTP API, identity and request hardening, the browser application
   pipeline.py  the nine agents and the run quality gates
   store.py     the governed output tables
-tests/         392 tests, including the section 14.1 acceptance criteria
+tests/         402 tests, including the section 14.1 acceptance criteria
 ```
 
 ## Tests
