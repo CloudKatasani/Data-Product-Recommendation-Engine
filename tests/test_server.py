@@ -52,6 +52,25 @@ def test_static_application_is_served(server):
             assert len(response.read()) > 1000
 
 
+def test_every_navigation_tab_has_a_view_and_conflicts_is_not_one(server):
+    """The register lives on the candidate card, not as a section of its own."""
+    import re
+    base, _ = server
+    with urllib.request.urlopen(f"{base}/", timeout=30) as response:
+        page = response.read().decode()
+    tabs = set(re.findall(r'data-view="([a-z]+)"', page))
+    views = set(re.findall(r'id="view-([a-z]+)"', page))
+    assert tabs == views
+    assert tabs == {"start", "backlog", "portfolio", "gaps", "ask", "runs"}
+    assert "view-conflicts" not in page
+
+    with urllib.request.urlopen(f"{base}/app.js", timeout=30) as response:
+        script = response.read().decode()
+    assert "renderConflicts" not in script
+    # Adjudication survives the removal, on the candidate card.
+    assert "paintCandidateConflicts" in script and "resolveConflict" in script
+
+
 def test_reference_endpoints(server):
     base, _ = server
     assert get(base, "/api/health")["status"] == "ok"

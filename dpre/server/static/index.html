@@ -18,7 +18,6 @@
     <button data-view="start" aria-current="page">Start</button>
     <button data-view="backlog">Backlog</button>
     <button data-view="portfolio">Portfolio</button>
-    <button data-view="conflicts">Conflicts</button>
     <button data-view="gaps">Gaps</button>
     <button data-view="ask">Ask</button>
     <button data-view="runs">Runs</button>
@@ -170,22 +169,6 @@
           usage at stake behind them.</p></div>
       <div class="table-wrap"><table id="heat-table"></table></div>
     </div>
-  </section>
-
-  <!-- ---------------- Conflicts ---------------- -->
-  <section class="view" id="view-conflicts" hidden>
-    <div class="card">
-      <h2>Conflict register</h2>
-      <p class="secondary small">Every nominal conflict, with the competing expressions, the
-        reports behind each side and the usage at stake. This is the first artifact a domain
-        steward sees, because unresolved conflicts are the reason two teams will never trust
-        the same number.</p>
-      <div class="row">
-        <label class="field">Reviewer <input id="conflict-reviewer" placeholder="your name"></label>
-        <label class="field">Pattern <select id="filter-pattern"><option value="">all</option></select></label>
-      </div>
-    </div>
-    <div id="conflict-list" class="stack"></div>
   </section>
 
   <!-- ---------------- Gaps ---------------- -->

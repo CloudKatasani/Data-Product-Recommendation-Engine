@@ -89,7 +89,6 @@ const state = {
   run: null,
   candidates: [],
   portfolio: null,
-  conflicts: [],
   industries: [],
   selectedIndustry: 'generic',
   uploads: [],
@@ -105,7 +104,7 @@ function showView(name) {
   $$('#tabs button').forEach(b => { if (b.dataset.view === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   $$('section.view').forEach(section => { section.hidden = section.id !== `view-${name}`; });
   const loaders = {
-    backlog: renderBacklog, portfolio: renderPortfolio, conflicts: renderConflicts,
+    backlog: renderBacklog, portfolio: renderPortfolio,
     gaps: renderGaps, runs: renderRuns, ask: renderAsk,
   };
   if (loaders[name]) loaders[name]();
@@ -633,14 +632,8 @@ function drawerBody(data) {
         ? el('button', { class: 'sm', onclick: () => acceptName(m.metric_id) }, 'Accept name') : '' },
   ], data.metrics || []);
 
-  panels.Conflicts = tableCard([
-    { label: 'Label', render: c => el('strong', {}, c.label) },
-    { label: 'Pattern', render: c => chip(c.pattern, 'warning') },
-    { label: 'Difference', render: c => el('span', { class: 'small' }, c.difference_summary) },
-    { label: 'Usage at stake', num: true, render: c => fmt.num(c.usage_weight_a + c.usage_weight_b) },
-    { label: 'Stage 6 decision', render: c => el('span', { class: 'small secondary' }, c.semantic_model_decision) },
-    { label: 'Status', render: c => chip(c.resolution_status, c.resolution_status === 'OPEN' ? 'warning' : 'good') },
-  ], data.conflicts || []);
+  panels.Conflicts = el('div', {});
+  paintCandidateConflicts(panels.Conflicts, data.conflicts || []);
 
   panels.Consumers = tableCard([
     { label: 'Business unit', render: c => el('strong', {}, c.business_unit) },
@@ -963,61 +956,54 @@ function renderCoverageChart(curve) {
     `The top 20 candidates cover ${fmt.pct((curve[Math.min(19, curve.length - 1)] || {}).cumulative_coverage, 1)} of usage-weighted KPI consumption.`));
 }
 
-/* -------------------------------------------------------------- conflicts */
-async function renderConflicts() {
-  if (!(await ensureRun())) { emptyView('#view-conflicts'); return; }
-  const data = await api(`/api/runs/${state.runId}/conflicts`);
-  state.conflicts = data.conflicts;
-  const patterns = ['', ...new Set(data.conflicts.map(c => c.pattern))];
-  const select = $('#filter-pattern');
-  const current = select.value;
-  select.innerHTML = '';
-  patterns.forEach(p => select.append(el('option', { value: p }, p || 'all')));
-  select.value = current;
-  select.onchange = paintConflicts;
-  paintConflicts();
-}
-
-function paintConflicts() {
-  const host = $('#conflict-list');
+/* --------------------------------------------- conflicts, on the candidate */
+function paintCandidateConflicts(host, conflicts) {
   host.innerHTML = '';
-  const pattern = $('#filter-pattern').value;
-  const rows = state.conflicts.filter(c => !pattern || c.pattern === pattern);
-  if (!rows.length) { host.append(el('div', { class: 'card empty' }, 'No conflicts in this run.')); return; }
-  rows.forEach(conflict => {
-    const card = el('div', { class: 'card stack' });
-    card.append(el('div', { class: 'row between' },
-      el('h3', {}, conflict.label),
-      el('div', { class: 'row' },
-        chip(conflict.pattern, 'warning'),
-        chip(conflict.resolution_status, conflict.resolution_status === 'OPEN' ? 'warning' : 'good'),
-        chip(`usage at stake ${fmt.num(conflict.usage_weight_a + conflict.usage_weight_b)}`))));
-    card.append(el('p', { class: 'secondary small' }, conflict.difference_summary));
-    card.append(el('div', { class: 'grid two' },
-      el('div', {}, el('div', { class: 'small muted' }, `Definition A · weight ${fmt.num(conflict.usage_weight_a)} · ${conflict.reports_a.length} reports`),
-        el('pre', { class: 'mono', style: 'white-space:pre-wrap' }, conflict.expression_a || '(not captured)')),
-      el('div', {}, el('div', { class: 'small muted' }, `Definition B · weight ${fmt.num(conflict.usage_weight_b)} · ${conflict.reports_b.length} reports`),
-        el('pre', { class: 'mono', style: 'white-space:pre-wrap' }, conflict.expression_b || '(not captured)'))));
-    card.append(el('div', { class: 'row between' },
-      el('div', { class: 'small secondary' }, `Stage 6 decision: ${conflict.semantic_model_decision}. Steward: ${conflict.steward_id || 'UNASSIGNED'}.`),
-      el('div', { class: 'row' },
-        el('button', { class: 'sm', onclick: () => resolveConflict(conflict, 'RESOLVED') }, 'Mark adjudicated'),
-        el('button', { class: 'sm ghost', onclick: () => resolveConflict(conflict, 'DEFERRED') }, 'Defer'))));
-    host.append(card);
-  });
+  host.append(el('p', { class: 'secondary small' },
+    'Competing definitions this candidate would have to reconcile. Adjudicating one is a '
+    + 'steward decision, so it is recorded against your reviewer name from the Review tab.'));
+  host.append(tableCard([
+    { label: 'Label', render: c => el('strong', {}, c.label) },
+    { label: 'Pattern', render: c => chip(c.pattern, 'warning') },
+    { label: 'Difference', render: c => el('div', {},
+        el('div', { class: 'small' }, c.difference_summary),
+        el('details', { class: 'raw' },
+          el('summary', {}, 'competing expressions'),
+          el('pre', { style: 'white-space:pre-wrap' },
+            `A  weight ${fmt.num(c.usage_weight_a)} \u00b7 ${(c.reports_a || []).length} reports\n`
+            + `${c.expression_a || '(not captured)'}\n\n`
+            + `B  weight ${fmt.num(c.usage_weight_b)} \u00b7 ${(c.reports_b || []).length} reports\n`
+            + `${c.expression_b || '(not captured)'}`))) },
+    { label: 'Usage at stake', num: true, render: c => fmt.num(c.usage_weight_a + c.usage_weight_b) },
+    { label: 'Stage 6 decision', render: c => el('span', { class: 'small secondary' },
+        c.semantic_model_decision) },
+    { label: 'Steward', render: c => c.steward_id || chip('unassigned', 'warning') },
+    { label: 'Status', render: c => chip(c.resolution_status,
+        c.resolution_status === 'OPEN' ? 'warning' : 'good') },
+    { label: '', render: c => c.resolution_status === 'OPEN'
+        ? el('div', { class: 'row' },
+            el('button', { class: 'sm',
+              onclick: () => resolveConflict(host, conflicts, c, 'RESOLVED') }, 'Mark adjudicated'),
+            el('button', { class: 'sm ghost',
+              onclick: () => resolveConflict(host, conflicts, c, 'DEFERRED') }, 'Defer'))
+        : '' },
+  ], conflicts));
 }
 
-async function resolveConflict(conflict, status) {
-  const reviewer = $('#conflict-reviewer').value.trim();
-  if (!reviewer) { flash('Adjudicating a conflict requires a named steward.', 'error'); return; }
+async function resolveConflict(host, conflicts, conflict, status) {
+  if (!state.reviewer) {
+    flash('Adjudicating a conflict requires a named steward. Set your reviewer name on the '
+          + 'Review tab first.', 'error');
+    return;
+  }
   try {
     await api(`/api/runs/${state.runId}/conflicts/${conflict.conflict_id}/resolve`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, reviewer }),
+      body: JSON.stringify({ status, reviewer: state.reviewer }),
     });
     conflict.resolution_status = status;
-    paintConflicts();
-    flash(`${conflict.label} marked ${status}.`, 'ok');
+    paintCandidateConflicts(host, conflicts);
+    flash(`${conflict.label} marked ${status} by ${state.reviewer}.`, 'ok');
   } catch (error) { flash(error.message, 'error'); }
 }
 
