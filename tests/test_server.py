@@ -7,6 +7,7 @@ state-changing POST. The refusals themselves live in ``tests/test_security.py``.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -461,3 +462,71 @@ def test_the_browser_asks_for_a_name_before_it_sends_a_client_extract(server):
         page = response.read().decode()
     assert 'id="start-identity"' in page
     assert "function paintStartNotice" in script
+
+
+def test_the_browser_sends_the_upload_id_the_server_hands_back(server):
+    """The regression that broke the Manual path end to end.
+
+    Uploads became opaque ids when paths stopped being served (R-05), and the
+    browser's own source builder still sent `path`. Every run was refused as an
+    unknown upload. Tests that assembled sources by hand could not see it,
+    because the thing that was wrong was the assembling.
+    """
+    base, _ = server
+    with urllib.request.urlopen(f"{base}/app.js", timeout=30) as response:
+        script = response.read().decode()
+    builder = script.split("function selectedSources(")[1].split("\n}")[0]
+    assert "upload_id: file.upload_id" in builder
+    assert "path: file.path" not in builder, "the server no longer serves paths"
+
+    # And the response it reads that from really does carry one.
+    with urllib.request.urlopen(f"{base}/api/v1/openapi.json", timeout=30) as response:
+        assert json.loads(response.read())["openapi"]
+
+
+def test_the_run_outcome_survives_the_click_it_came_from(server):
+    """The status line was rewritten by the readiness helper in a finally
+    block, so success, refusal and error all vanished and the panel read as
+    though the button had done nothing."""
+    base, _ = server
+    with urllib.request.urlopen(f"{base}/app.js", timeout=30) as response:
+        script = response.read().decode()
+    handler = script.split("$('#btn-run-manual').addEventListener")[1].split("\n});")[0]
+    # Read the code, not the comments: a comment explaining why the helper is
+    # not called would otherwise fail this.
+    code = re.sub(r"/\*.*?\*/", "", handler, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
+    assert "updateManualReadiness(" not in code, \
+        "the finally block must not rewrite the status the run just wrote"
+    # A failure is shown where the button is, not only at the top of the page.
+    assert "status.append" in code and "banner error" in code
+
+
+def test_one_estate_is_read_through_one_catalog(server, tmp_path):
+    """Collibra and Alation describe the same physical estate. Ingesting both
+    counts every column twice and inflates the backlog."""
+    from dpre.ingest import ingest_manual
+    from dpre.ingest.schemas import SCHEMAS
+    from dpre.synth import generate_pack
+    from dpre.synth.workbook import write_pack_workbook
+    import datetime as _dt
+
+    pack = generate_pack("utility", as_of=_dt.date(2026, 9, 17))
+    path = write_pack_workbook(pack, tmp_path / "both.xlsx")
+    from dpre.ingest import SourceSpec, inspect_file
+    specs = []
+    for table in inspect_file(path, sample_rows=0)["tables"]:
+        key = table["suggested_schema"]
+        if key in SCHEMAS and table["confidence"] >= 0.4:
+            specs.append(SourceSpec(path=str(path), schema_key=key, sheet=table["sheet"],
+                                    mapping=table["mapping"]))
+    bound = {s.schema_key for s in specs}
+    if not {"collibra_metadata", "alation_metadata"} <= bound:
+        pytest.skip("this pack does not carry both catalogs")
+
+    ingest = ingest_manual(specs, as_of=_dt.date(2026, 9, 17))
+    catalogs = {c.catalog for c in ingest.bundle.columns}
+    assert len(catalogs) == 1, "an estate read through two catalogs is counted twice"
+    assert ingest.bundle.catalog in ("collibra", "alation")
+    assert any(e.get("status") == "deduplicated" for e in ingest.log), \
+        "setting a catalog aside is a decision the run should record"

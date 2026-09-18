@@ -461,11 +461,29 @@ function renderTableBinding(file, tableInfo, fileIndex, tableIndex) {
 }
 
 function selectedSources() {
+  /* The server stopped handing out paths when uploads became opaque ids, and
+     nothing here followed: every source went up with an id of undefined and
+     the run was refused as an unknown upload. The id is the only handle a
+     client ever gets to an extract it uploaded. */
   const sources = [];
+  /* Collibra and Alation describe the same estate, so binding both counts
+     every column twice and inflates the backlog. The selector decides; with no
+     preference the first catalog bound wins, as the command line does. */
+  const preferred = ($('#manual-catalog') || {}).value || '';
+  const bound = [];
+  state.uploads.forEach(file => (file.tables || []).forEach(t => {
+    if (t.binding === 'collibra_metadata' || t.binding === 'alation_metadata') bound.push(t.binding);
+  }));
+  const catalog = preferred
+    ? (preferred === 'alation' ? 'alation_metadata' : 'collibra_metadata')
+    : (bound[0] || '');
   state.uploads.forEach(file => (file.tables || []).forEach(tableInfo => {
     if (!tableInfo.binding) return;
+    if (catalog && (tableInfo.binding === 'alation_metadata'
+                    || tableInfo.binding === 'collibra_metadata')
+        && tableInfo.binding !== catalog) return;
     sources.push({
-      path: file.path, schema_key: tableInfo.binding, sheet: tableInfo.sheet,
+      upload_id: file.upload_id, schema_key: tableInfo.binding, sheet: tableInfo.sheet,
       mapping: tableInfo.mapping, label: file.file,
     });
   }));
@@ -478,9 +496,21 @@ function updateManualReadiness() {
   $('#btn-run-manual').disabled = !hasLineage;
   const status = $('#manual-status');
   if (!sources.length) { status.textContent = 'Bind at least one table to an input contract.'; return; }
-  status.textContent = hasLineage
-    ? `${sources.length} table(s) bound. The engine will resolve them into one graph.`
-    : 'A KPI lineage extract (Cognos or Power BI) is required before the engine can run.';
+  if (!hasLineage) {
+    status.textContent =
+      'A KPI lineage extract (Cognos or Power BI) is required before the engine can run.';
+    return;
+  }
+  const catalog = sources.find(s => s.schema_key === 'collibra_metadata'
+                                 || s.schema_key === 'alation_metadata');
+  const both = state.uploads.some(f => (f.tables || []).some(t => t.binding === 'collibra_metadata'))
+    && state.uploads.some(f => (f.tables || []).some(t => t.binding === 'alation_metadata'));
+  status.textContent =
+    `${sources.length} table(s) bound. The engine will resolve them into one graph.`
+    + (both && catalog
+        ? ` Both catalogs describe this estate, so only ${catalog.schema_key.split('_')[0]}`
+          + ' is used; the other would count every column twice.'
+        : '');
 }
 
 $('#btn-run-manual').addEventListener('click', async () => {
@@ -499,19 +529,24 @@ $('#btn-run-manual').addEventListener('click', async () => {
         as_of: $('#manual-asof').value || null,
       }),
     });
-    status.textContent = '';
+    status.innerHTML = '';
     if (result.ok === false) {
       renderIngestIssues(result.ingest);
-      flash('Ingestion failed validation. Fix the errors listed below, or bind the missing input.', 'error', 15000);
+      status.append(el('div', { class: 'banner error' },
+        'Ingestion failed validation. Fix the errors listed below, or bind the missing input.'));
       return;
     }
     await adoptRun(result);
   } catch (error) {
-    status.textContent = '';
-    flash(error.message, 'error', 15000);
+    status.innerHTML = '';
+    if (error.status === 401) status.append(signInBanner(error.message));
+    else status.append(el('div', { class: 'banner error' }, error.message));
   } finally {
-    button.disabled = false;
-    updateManualReadiness();
+    /* Only the button's state is refreshed here. updateManualReadiness() also
+       rewrites the status line, which overwrote whatever the run had just
+       said - success, refusal or error - and left the panel reading as though
+       nothing had happened. */
+    button.disabled = !selectedSources().length;
   }
 });
 

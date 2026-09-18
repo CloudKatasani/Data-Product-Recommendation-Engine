@@ -196,8 +196,19 @@ def ingest_manual(sources: list[SourceSpec], as_of: _dt.date | None = None,
         bundle.catalog = catalog_preference
     elif catalogs_seen:
         bundle.catalog = catalogs_seen[0]
-    if catalog_preference and len(set(catalogs_seen)) > 1:
-        bundle.columns = [c for c in bundle.columns if c.catalog == catalog_preference]
+    if len(set(catalogs_seen)) > 1:
+        # Collibra and Alation describe the same physical estate. Keeping both
+        # counts every column twice, which inflates duplication, definition
+        # coverage and ultimately the backlog. Without a stated preference the
+        # first one bound wins, and the run says which it used.
+        kept = bundle.catalog
+        dropped = sum(1 for c in bundle.columns if c.catalog != kept)
+        bundle.columns = [c for c in bundle.columns if c.catalog == kept]
+        log.append({"source": "catalog", "status": "deduplicated",
+                    "detail": f"both catalogs were supplied for one estate; kept {kept} "
+                              f"and set aside {dropped} column(s) from the other, which "
+                              "would otherwise have been counted twice",
+                    "rows_out": len(bundle.columns)})
 
     bundle.source_files = described
     bundle.synthetic = bool(bundle.kpis) and all(k.synthetic for k in bundle.kpis)
