@@ -8,9 +8,9 @@ synthetic pack for an industry and ingests that. Both produce the same
 from __future__ import annotations
 
 import datetime as _dt
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from ..models import ExtractBundle
+from ..models import ExtractBundle, KpiRecord
 from ..util import tabular
 from ..util.xlsx import read_workbook, rows_to_records
 from .adapters import catalog as catalog_adapter
@@ -88,7 +88,9 @@ def inspect_file(path: str | Path, sample_rows: int = 3) -> dict:
 
 def _describe(path: Path, records: list[dict], sheet: str | None, sample_rows: int) -> dict:
     columns = list(records[0].keys()) if records else []
-    schema_key, confidence = suggest_schema(columns)
+    # The tab name is evidence too, and for a catalog export it is usually the
+    # only evidence that separates Collibra from Alation.
+    schema_key, confidence = suggest_schema(columns, sheet or path.stem)
     mapping = map_columns(schema_key, columns) if schema_key else {}
     schema = SCHEMAS.get(schema_key)
     missing = [f for f in (schema.required_fields if schema else []) if f not in mapping]
@@ -174,6 +176,20 @@ def ingest_manual(sources: list[SourceSpec], as_of: _dt.date | None = None,
         log.append(entry)
         described.append({**source.to_dict(), "rows": entry.get("rows_out", 0)})
 
+    attached, orphaned = _attach_model_measures(bundle)
+    if attached:
+        log.append({"source": "powerbi_measure_lineage", "status": "resolved",
+                    "detail": f"{attached} model-scoped measure row(s) attached to the "
+                              "reports that use their semantic model",
+                    "rows_out": attached})
+    if orphaned:
+        log.append({"source": "powerbi_measure_lineage", "status": "dropped",
+                    "detail": f"{orphaned} measure(s) could not be placed: a report-scoped "
+                              "measure naming no report, or a semantic model no report in "
+                              "the inventory uses. Supply the Power BI inventory for those "
+                              "workspaces, or the report each local measure belongs to",
+                    "rows_out": 0})
+
     # A user who supplied both catalogs keeps whichever they asked for; otherwise
     # the first one wins. Downstream never learns which catalog it was.
     if catalog_preference in ("collibra", "alation"):
@@ -215,6 +231,58 @@ def _check_coverage(sources: list[SourceSpec], report: ValidationReport) -> None
             report.add("info", "MISSING_RECOMMENDED_INPUT",
                        f"{SCHEMAS[key].label} was not provided",
                        "Scores will be computed without it and the gap is recorded.")
+
+
+def _attach_model_measures(bundle: ExtractBundle) -> tuple[int, int]:
+    """Give every report-less measure the reports that actually use it.
+
+    A shared Power BI measure is defined once on a semantic model and consumed
+    by every report built on that model. The lineage export therefore names the
+    model, not a report. The engine's graph is KPI-to-Report, so one such row
+    becomes one KPI node per consuming report - which is also what makes a
+    shared measure look shared, and therefore worth consolidating.
+
+    Returns the number of rows attached and the number that could not be
+    placed - a report-scoped measure naming no report, or a model no report in
+    the bundle uses. Both are gaps worth reporting rather than rows worth
+    dropping quietly.
+    """
+    # Only a model-scoped measure fans out. A report-scoped one that names no
+    # report is unattributable, and spreading it across every report on the
+    # model would invent usage that the export does not claim.
+    pending = [k for k in bundle.kpis
+               if k.tool == "powerbi" and not k.report_id and k.measure_scope == "model"]
+    unattributable = [k for k in bundle.kpis
+                      if k.tool == "powerbi" and not k.report_id
+                      and k.measure_scope != "model"]
+    if not pending and not unattributable:
+        return 0, 0
+
+    by_model: dict[str, list[str]] = {}
+    for report in bundle.reports:
+        container = (report.semantic_container or "").strip().lower()
+        if container:
+            by_model.setdefault(container, []).append(report.report_id)
+
+    attached = 0
+    orphaned = len(unattributable)
+    expanded: list[KpiRecord] = []
+    for measure in pending:
+        reports = by_model.get((measure.semantic_container or "").strip().lower(), [])
+        if not reports:
+            orphaned += 1
+            continue
+        measure.report_id = reports[0]
+        attached += 1
+        for extra in reports[1:]:
+            clone = replace(measure, report_id=extra,
+                            kpi_id=f"{measure.kpi_id}::{extra}")
+            expanded.append(clone)
+    bundle.kpis.extend(expanded)
+    if orphaned:
+        bundle.kpis = [k for k in bundle.kpis
+                       if not (k.tool == "powerbi" and not k.report_id)]
+    return attached + len(expanded), orphaned
 
 
 def _load(source: SourceSpec) -> list[dict]:

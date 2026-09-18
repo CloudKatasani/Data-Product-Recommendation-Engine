@@ -54,10 +54,17 @@ def adapt_measures(records: list[dict], mapping: dict[str, str] | None = None,
     out: list[KpiRecord] = []
     for record in records:
         measure_id = reader.text(record, "measure_id")
-        report_id = reader.text(record, "report_id")
-        if not measure_id or not report_id:
+        if not measure_id:
             continue
-        scope = reader.text(record, "measure_scope", "report").lower()
+        # A model-scoped measure belongs to the semantic model and is used by
+        # every report on it (section 16.2), so it carries no report of its
+        # own. Dropping those rows silently discarded the shared measures -
+        # exactly the ones most worth consolidating. ingest_manual attaches
+        # them to their model's reports once the inventory is also loaded.
+        report_id = reader.text(record, "report_id")
+        scope = reader.text(record, "measure_scope", "").lower()
+        if not scope:
+            scope = "report" if report_id else "model"
         kpi = KpiRecord(
             kpi_id=measure_id,
             kpi_label=reader.text(record, "measure_name", measure_id),

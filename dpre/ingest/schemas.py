@@ -138,8 +138,14 @@ POWERBI_MEASURE_LINEAGE = InputSchema(
     fields=(
         FieldSpec("measure_id", True, "KPI node identity", ("id", "kpi_id")),
         FieldSpec("measure_name", True, "KPI identity", ("name", "kpi_label")),
-        FieldSpec("report_id", True, "KPI to Report edge", ("report",)),
+        # Not required: section 16.2 distinguishes a model-scoped (shared)
+        # measure, which belongs to the semantic model and is used by many
+        # reports, from a report-scoped one. A real Power BI export carries no
+        # report for the former, and demanding one rejected the whole sheet.
+        FieldSpec("report_id", False, "KPI to Report edge, for a report-scoped measure",
+                  ("report", "defined_in_report", "report_name")),
         FieldSpec("semantic_model", True, "Semantic container", ("dataset", "fm_package")),
+        FieldSpec("model_id", False, "Semantic container identity", ("dataset_id",)),
         FieldSpec("dax_expression", True, "Parsed to an AST", ("expression", "calculation_expression")),
         FieldSpec("source_system", True, "KPI to Column edge", ("system", "ds_name")),
         FieldSpec("source_database", True, "KPI to Column edge", ("database", "db_name")),
@@ -231,14 +237,21 @@ ALATION_METADATA = InputSchema(
     description="The same physical estate in Alation's export shape (section 16.3).",
     fields=(
         FieldSpec("ds_name", True, "Physical node identity", ("system", "data_source")),
-        FieldSpec("db_name", True, "Physical node identity", ("database",)),
+        # Alation models a data source and a schema; many deployments carry no
+        # separate database level at all, so requiring one rejected exports
+        # that were complete. The adapter falls back to the data source name.
+        FieldSpec("db_name", False, "Physical node identity",
+                  ("database", "database_name", "catalog")),
         FieldSpec("schema_name", True, "Physical node identity", ("schema",)),
         FieldSpec("table_name", True, "Physical node identity", ("table",)),
         FieldSpec("column_name", True, "Physical node identity", ("column",)),
         FieldSpec("custom_field_domain", True, "Domain assignment", ("domain", "data_domain")),
         FieldSpec("steward", True, "Steward candidate", ("data_steward",)),
-        FieldSpec("sensitivity_label", True, "Risk score", ("classification", "sensitivity")),
-        FieldSpec("pii", True, "Risk score", ("pii_flag",)),
+        # Alation exposes these as custom fields, and their names vary by
+        # deployment; a missing sensitivity is scored as Internal, not dropped.
+        FieldSpec("sensitivity_label", False, "Risk score",
+                  ("classification", "sensitivity", "custom_field_sensitivity")),
+        FieldSpec("pii", False, "Risk score", ("pii_flag", "custom_field_pii")),
         FieldSpec("data_owner", False, "Owner candidate", ("owner",)),
         FieldSpec("title", False, "Business term", ("business_term",)),
         FieldSpec("description", False, "Definition", ("definition",)),
@@ -269,10 +282,37 @@ CATALOG_INPUTS = ("collibra_metadata", "alation_metadata")
 RECOMMENDED_INPUTS = ("cognos_rationalization",) + CATALOG_INPUTS
 
 
-def suggest_schema(columns: list[str]) -> tuple[str, float]:
-    """Guess which input a user-provided file is, from its header row."""
+#: Tabs that document a workbook rather than feed the engine. Guessing a schema
+#: for one produces a 6%-confidence suggestion that is noise in the inspector
+#: and a trap for anyone who binds it by hand.
+NON_INPUT_TABS = frozenset({
+    "readme", "read_me", "planted_defects", "defects", "notes", "cover",
+    "contents", "index", "instructions", "changelog", "manifest", "glossary_notes",
+})
+
+
+def _normalize(value: str) -> str:
+    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def suggest_schema(columns: list[str], sheet: str = "") -> tuple[str, float]:
+    """Guess which input a file or tab is, from its headers and its name.
+
+    Header overlap alone cannot separate Collibra from Alation: both describe
+    columns, and a client whose Collibra export uses generic names like
+    ``schema_name`` scores higher against Alation than against the catalog it
+    actually came from. The tab name settles it, because a sheet called
+    ``Collibra_Metadata`` is not ambiguous to a human and should not be to us.
+    """
+    name = _normalize(sheet)
+    if name in NON_INPUT_TABS:
+        return "", 0.0
+
+    lowered = {_normalize(c) for c in columns if c}
+    by_tab = {_normalize(s.tab): key for key, s in SCHEMAS.items() if s.tab}
+
     best, best_score = "", 0.0
-    lowered = {str(c).strip().lower().replace(" ", "_") for c in columns if c}
+    named = by_tab.get(name) or (name if name in SCHEMAS else "")
     for key, schema in SCHEMAS.items():
         hits = 0
         for spec in schema.fields:
@@ -280,9 +320,14 @@ def suggest_schema(columns: list[str]) -> tuple[str, float]:
                 hits += 2 if spec.required else 1
         total = sum(2 if f.required else 1 for f in schema.fields)
         score = hits / total if total else 0.0
+        if key == named:
+            # The name is decisive, but only for a sheet whose headers are at
+            # least plausible: a tab named after a schema and shaped like
+            # nothing is still a mismatch worth reporting honestly.
+            score = max(score, 0.5) + 0.5 if score >= 0.25 else score
         if score > best_score:
             best, best_score = key, score
-    return best, round(best_score, 3)
+    return best, round(min(1.0, best_score), 3)
 
 
 def map_columns(schema_key: str, columns: list[str]) -> dict[str, str]:
