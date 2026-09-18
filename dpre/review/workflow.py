@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from ..governance.reasons import DECISIONS, REASON_CODES
 from ..models import ReviewDecision
-from ..store import ProposeOnlyError, Store
+from ..store import GateError, ProposeOnlyError, Store
 from ..util.ids import stable_id
 
 __all__ = ["DECISIONS", "REASON_CODES", "ReviewOutcome", "review", "confirm_consumer",
@@ -86,6 +86,11 @@ def review(store: Store, run_id: str, candidate_id: str, decision: str, reviewer
             waiver_reason=waiver_reason, second_approver=second_approver,
             usable_without_rework=usable_without_rework, rework_needed=rework_needed,
             value=value)
+        # After the candidate's own gates, never before: a Blocked candidate
+        # should be refused on its own gate, not on somebody else's status. The
+        # transaction rolls the decision row back if this refuses.
+        if decision == "Accept":
+            _check_open_dependencies(store, run_id, candidate_id, reason_code)
         created: list[str] = []
         outcome_note = note
         if decision == "Merge":
@@ -102,6 +107,51 @@ def review(store: Store, run_id: str, candidate_id: str, decision: str, reviewer
     return ReviewOutcome(record, refreshed["status"] if refreshed else "", created, outcome_note,
                          decision_id=row["decision_id"], previous_status=row["previous_status"] or "",
                          row=row)
+
+
+#: Statuses that mean a reviewer has already decided this part is not being
+#: built in its current form. Proposed is deliberately absent.
+NOT_BEING_BUILT = frozenset({"Exploratory", "Blocked", "Deferred", "Rejected"})
+
+
+def _check_open_dependencies(store: Store, run_id: str, candidate_id: str,
+                             reason_code: str) -> None:
+    """A composite cannot be Accepted over a part that will not be built (R-11).
+
+    Accepting a candidate that sits on top of an Exploratory entity master
+    commits a delivery date to something nobody has agreed to build. The
+    reviewer may still do it - programmes are accepted with open dependencies
+    all the time - but only by saying so on the record, which is what the
+    reason code ``accept_with_open_dependencies`` is for.
+
+    A *Proposed* part is not a blocker: it is in the same review pass and will
+    be decided in the same session, and refusing on it would mean accepting the
+    backlog strictly bottom-up. What blocks is a part the board has already put
+    somewhere else - Exploratory, Blocked, Deferred, Rejected - because that is
+    a decision to not build it yet.
+    """
+    if reason_code == "accept_with_open_dependencies":
+        return
+    # Read the rows directly rather than through load_dependencies: that helper
+    # calls its module's ensure_schema, which commits, and this runs inside the
+    # decision's transaction. Store creates the table at open time instead.
+    rows = store.query(
+        "SELECT target FROM DP_CANDIDATE_DEPENDENCY WHERE run_id = ? AND candidate_id = ? "
+        "AND type IN ('candidate', 'entity_master')", (run_id, candidate_id))
+    targets = {row["target"] for row in rows}
+    if not targets:
+        return
+    open_parts = []
+    for target in sorted(targets):
+        part = store.candidate(run_id, target)
+        if part is not None and part["status"] in NOT_BEING_BUILT:
+            open_parts.append(f"{part['proposed_name']} ({target}, {part['status']})")
+    if open_parts:
+        raise GateError(
+            f"{candidate_id} depends on {len(open_parts)} part(s) the board has already "
+            "decided not to build yet: " + "; ".join(open_parts)
+            + ". Settle those first, or record this Accept with reason code "
+              "'accept_with_open_dependencies'.")
 
 
 def accept_with_exception(store: Store, run_id: str, candidate_id: str, reviewer: str,

@@ -59,6 +59,24 @@ def _by_status(store: Store, run_id: str) -> dict[str, list[dict]]:
     return out
 
 
+def _standalone(store: Store, run_id: str, status: str = "Proposed") -> dict:
+    """A candidate of this status that no other candidate's delivery depends on.
+
+    Accepting a composite over a part the board has Rejected or Deferred is
+    refused on purpose (R-11), so a test about something else picks a candidate
+    where that control is not in play.
+    """
+    blocked = {row["candidate_id"] for row in store.query(
+        "SELECT d.candidate_id FROM DP_CANDIDATE_DEPENDENCY d "
+        "JOIN DP_CANDIDATE c ON c.run_id = d.run_id AND c.candidate_id = d.target "
+        "WHERE d.run_id = ? AND d.type IN ('candidate', 'entity_master') "
+        "  AND c.status IN ('Exploratory', 'Blocked', 'Deferred', 'Rejected')", (run_id,))}
+    for row in reversed(_by_status(store, run_id)[status]):
+        if row["candidate_id"] not in blocked:
+            return row
+    raise AssertionError(f"no {status} candidate without open dependencies")
+
+
 def _synthetic_candidates(store: Store, run_id: str, count: int, seed: int = 7,
                           status: str = "Proposed", failed_gates: tuple[str, ...] = ()) -> list[dict]:
     """Candidate and score rows with known dimension scores, written directly.
@@ -590,7 +608,7 @@ def test_conflict_key_is_order_free():
 
 def test_reason_codes_are_validated_server_side(governed):
     result, store = governed
-    candidate = _by_status(store, result.run_id)["Proposed"][-1]
+    candidate = _standalone(store, result.run_id)
     for decision in ("Reject", "Defer", "Merge", "Split", "Override"):
         with pytest.raises(ReasonCodeError):
             validate_reason(decision, "")
@@ -715,3 +733,33 @@ def test_approval_needs_the_floor_and_a_hold_out_win(tmp_path):
         approve_weights(store, weak, "data product council")
     assert store.weights("v-weak") == []
     store.close()
+
+
+def test_a_composite_is_not_accepted_over_a_part_the_board_parked(governed):
+    """R-11: accepting on top of a Rejected or Deferred part is a commitment
+    to a delivery date nobody has agreed to, so it needs saying out loud."""
+    result, store = governed
+    rows = store.query(
+        "SELECT DISTINCT d.candidate_id FROM DP_CANDIDATE_DEPENDENCY d "
+        "JOIN DP_CANDIDATE c ON c.run_id = d.run_id AND c.candidate_id = d.target "
+        "WHERE d.run_id = ? AND d.type IN ('candidate', 'entity_master') "
+        "  AND c.status IN ('Exploratory', 'Blocked', 'Deferred', 'Rejected')",
+        (result.run_id,))
+    stacked = [row["candidate_id"] for row in rows
+               if (store.candidate(result.run_id, row["candidate_id"]) or {}).get("status")
+               == "Proposed"]
+    assert stacked, "earlier decisions in this module should have parked a part"
+    candidate_id = stacked[0]
+
+    with pytest.raises(GateError, match="decided not to build yet"):
+        review(store, result.run_id, candidate_id, "Accept", "priya.silva",
+               reason_code="value_clear")
+    # The refusal leaves nothing behind: the decision row rolls back with it.
+    assert store.candidate(result.run_id, candidate_id)["status"] == "Proposed"
+    assert not [d for d in store.decisions(result.run_id)
+                if d["candidate_id"] == candidate_id and d["decision"] == "Accept"]
+
+    outcome = review(store, result.run_id, candidate_id, "Accept", "priya.silva",
+                     reason_code="accept_with_open_dependencies",
+                     note="the entity master is in the next wave and the board knows")
+    assert outcome.status == "Accepted"

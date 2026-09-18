@@ -277,7 +277,30 @@ class Store:
         self.connection.executescript(SCHEMA)
         self._migrate()
         _ledger.ensure_schema(self.connection)
+        self._ensure_module_schemas()
         self._seed_initial_weights()
+
+    #: Modules that own tables of their own and register them here, so every
+    #: table this database will ever hold exists before the first transaction
+    #: opens. Their own ``ensure_schema`` commits, which would end an enclosing
+    #: transaction early, so nothing may call one from inside a write.
+    MODULE_SCHEMAS = (
+        "dpre.value.assumptions", "dpre.value.model",
+        "dpre.programme.effort", "dpre.programme.dependencies",
+        "dpre.programme.waves", "dpre.programme.raid",
+        "dpre.score.sensitivity", "dpre.portfolio.benchmark",
+    )
+
+    def _ensure_module_schemas(self) -> None:
+        import importlib
+        for name in self.MODULE_SCHEMAS:
+            try:
+                module = importlib.import_module(name)
+            except ImportError:                                # pragma: no cover
+                continue
+            schema = getattr(module, "SCHEMA", "")
+            if schema:
+                self.connection.executescript(schema)
 
     # -- lifecycle ------------------------------------------------------
     def close(self) -> None:
