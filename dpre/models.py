@@ -509,6 +509,18 @@ class ReviewDecision:
     target_candidate_id: str = ""
     note: str = ""
     run_id: str = ""
+    # Written by the governance ledger (specification sections 10.2 and 13.1).
+    previous_status: str = ""
+    new_status: str = ""
+    previous_value: str = ""
+    actor_role: str = "reviewer"
+    subject_type: str = "candidate"          # candidate | conflict | metric | report
+    gate_waived: str = ""
+    waiver_reason: str = ""
+    second_approver: str = ""
+    usable_without_rework: bool | None = None
+    rework_needed: list[str] = field(default_factory=list)
+    engagement_id: str = ""
 
 
 @dataclass

@@ -1408,9 +1408,24 @@ def _weights_from_rows(rows: list[dict], version: str, approved_by: str,
 
 
 def _candidate_payload(candidate: Candidate) -> dict:
+    """Everything the card shows, in one JSON column.
+
+    The pipeline hangs its derived figures on the candidate as private
+    attributes rather than widening the dataclass, so they are collected here.
+    Carrying them in the payload means a backlog card can show size, money,
+    wave and rank stability without a second query per candidate, which is the
+    difference between a review session that flows and one that waits.
+    """
     payload = asdict(candidate)
     payload["grain_ambiguity"] = getattr(candidate, "_grain_ambiguity", 0.0)
     payload["usage_weight"] = getattr(candidate, "_usage_weight", 0.0)
     payload["classification_rationale"] = getattr(candidate, "_classification_rationale", {})
     payload["reuse_communities"] = getattr(candidate, "_reuse_communities", 0)
+    # Written by the Programme step (dpre.programme.enrich_run); absent when the
+    # pipeline is driven without it, which is why each one has a default.
+    payload["effort"] = getattr(candidate, "_effort", {})
+    payload["value"] = getattr(candidate, "_value", {})
+    payload["wave"] = getattr(candidate, "_wave", None)
+    payload["rank_range"] = getattr(candidate, "_rank_range", {})
+    payload["consumer_confirmed"] = bool(getattr(candidate, "_consumer_confirmed", False))
     return payload

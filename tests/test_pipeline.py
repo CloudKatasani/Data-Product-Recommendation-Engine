@@ -14,11 +14,11 @@ from dpre.synth import INDUSTRY_KEYS
 AS_OF = _dt.date(2026, 9, 17)
 
 
-def test_the_seven_agents_all_report(run):
+def test_every_agent_reports(run):
     result, _store = run
     agents = [entry["agent"] for entry in result.manifest.agent_log]
     assert agents == ["Ingestor", "Resolver", "Canonicalizer", "Clusterer", "Scorer",
-                      "Narrator", "Critic"]
+                      "Narrator", "Critic", "Programme"]
     assert all(entry["seconds"] >= 0 for entry in result.manifest.agent_log)
     assert all(entry["note"] for entry in result.manifest.agent_log)
 

@@ -544,11 +544,11 @@ def test_ledgers_seed_the_next_run_and_flag_changed_definitions(tmp_path):
                             "ORDER BY report_id LIMIT 1", (first.run_id,))[0]["report_id"]
     mark_decision_critical(store, first.run_id, report_id, "priya.silva")
 
+    # The pipeline seeds the ledgers itself: a steward's verdict survives the next
+    # run without anyone remembering to run a command.
     second = run_pipeline(ingest_automated("utility", as_of=AS_OF), store=store)
-    assert next(c for c in store.conflicts(second.run_id)
-                if c["conflict_id"] == conflict["conflict_id"])["resolution_status"] == "OPEN"
-    seeded = seed_from_ledgers(store, second.run_id)
-    assert seeded["applied"] == 3 and seeded["definition_changed"] == 0
+    assert second.manifest.stats["ledger_seeding"]["applied"] == 3
+    assert second.manifest.stats["ledger_seeding"]["definition_changed"] == 0
     assert next(c for c in store.conflicts(second.run_id)
                 if c["conflict_id"] == conflict["conflict_id"])["resolution_status"] == "RESOLVED_B"
     renamed = next(m for m in store.metrics(second.run_id) if m["metric_id"] == metric["metric_id"])
@@ -560,11 +560,17 @@ def test_ledgers_seed_the_next_run_and_flag_changed_definitions(tmp_path):
 
     # A third run where the adjudicated pair now fingerprints differently: the
     # ledger recognises the same KPIs and re-opens with 'definition changed'.
+    # The pipeline seeds on its way through, so to stand in for a run whose
+    # calculation genuinely changed we re-point the fingerprint and let the
+    # ledger see this run for the first time.
     third = run_pipeline(ingest_automated("utility", as_of=AS_OF), store=store)
     kpis_a = store.query("SELECT kpi_ids FROM KPI_CANONICAL WHERE run_id = ? AND metric_id = ?",
                          (third.run_id, conflict["metric_id_a"]))[0]["kpi_ids"]
     store.connection.execute("UPDATE KPI_CANONICAL SET fingerprint = 'CHANGED' WHERE run_id = ? "
                              "AND metric_id = ?", (third.run_id, conflict["metric_id_a"]))
+    store.connection.execute("DELETE FROM GOVERNANCE_SEED WHERE run_id = ?", (third.run_id,))
+    store.connection.execute("UPDATE KPI_CONFLICT SET resolution_status = 'OPEN' "
+                             "WHERE run_id = ?", (third.run_id,))
     seeded = seed_from_ledgers(store, third.run_id)
     flagged = [r for r in seeded["rows"] if r["outcome"] == "definition changed"]
     assert any(r["subject_id"] == conflict["conflict_id"] for r in flagged)

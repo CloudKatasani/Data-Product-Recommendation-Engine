@@ -159,7 +159,16 @@ def _measure(key: str, label: str, actual: Any, target: Any, unit: str, context:
 # --------------------------------------------------------------------------
 
 def _decisions_since(decisions: list[dict], since: str) -> dict:
-    recent = [d for d in decisions if not since or (d["decided_at"] or "") > since]
+    """Decisions humans took in this period.
+
+    A status carried forward from an earlier run writes a decision row so the
+    audit chain has something behind the status, but nobody decided anything
+    this period: counting those as throughput would flatter the report. They are
+    reported separately.
+    """
+    human = [d for d in decisions if (d.get("actor_role") or "") != "carry_forward"]
+    carried = [d for d in decisions if (d.get("actor_role") or "") == "carry_forward"]
+    recent = [d for d in human if not since or (d["decided_at"] or "") > since]
     return {
         "since": since or "start of run",
         "total": len(recent),
@@ -167,7 +176,10 @@ def _decisions_since(decisions: list[dict], since: str) -> dict:
         "by_reason": dict(_count(f"{d['decision']}:{d['reason_code']}" for d in recent
                                  if d["reason_code"])),
         "by_reviewer": dict(_count(d["reviewer"] for d in recent)),
-        "all_time_by_type": dict(_count(d["decision"] for d in decisions)),
+        "all_time_by_type": dict(_count(d["decision"] for d in human)),
+        "carried_forward": len(carried),
+        "carried_forward_by_status": dict(_count(d.get("new_status") or d["decision"]
+                                                 for d in carried)),
     }
 
 

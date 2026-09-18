@@ -1,9 +1,16 @@
 """The agent pipeline (specification section 10).
 
-Six chartered agents and one human gate: Ingestor, Resolver, Canonicalizer,
-Clusterer, Scorer, Narrator, Critic. Each writes only its own output tables and
+Chartered agents and one human gate: Ingestor, Resolver, Canonicalizer,
+Clusterer, Scorer, Narrator, Critic, and a Programme step that prices and
+sequences what the others found. Each writes only its own output tables and
 stamps a run id, so any recommendation can be replayed from the extracts that
 produced it. No agent can move a candidate's status past Proposed.
+
+A run is not stateless. Decisions a human already took - a report marked
+decision-critical, a consumer confirmed, a conflict adjudicated, a metric name
+accepted - are held in run-independent ledgers and applied to this run before it
+is scored, so the estate's governance survives re-running the engine
+(specification sections 10.2 and 13.1).
 """
 from __future__ import annotations
 
@@ -21,6 +28,10 @@ from .config import QUALITY_GATES, EngineConfig
 from .graph import build_graph
 from .ingest import IngestResult
 from .models import Candidate, ExtractBundle, KnowledgeGraph, RunManifest
+from .governance import carry_forward
+from .governance.identity import lineage_id
+from .governance.seeding import seed_from_ledgers
+from .programme import enrich_run
 from .narrate.critic import critique
 from .narrate.narrator import narrate
 from .portfolio.views import portfolio_views
@@ -39,6 +50,7 @@ class RunResult:
     cluster: ClusterResult
     candidates: list[Candidate] = field(default_factory=list)
     portfolio: dict = field(default_factory=dict)
+    programme: dict = field(default_factory=dict)
     config: EngineConfig = field(default_factory=EngineConfig)
 
     @property
@@ -92,6 +104,15 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
                      f"{len(bundle.columns)} catalog columns", t0,
          len(bundle.reports) + len(bundle.kpis) + len(bundle.columns))
 
+    # ---- reviewer memory: overrides recorded in earlier runs ----------
+    overrides_applied = _apply_report_overrides(bundle, store)
+    if overrides_applied:
+        agent_log.append({
+            "agent": "Ingestor", "note": f"{overrides_applied} report override(s) carried "
+            "forward from earlier reviewer decisions", "rows": overrides_applied,
+            "seconds": 0.0,
+        })
+
     # ---- Resolver -----------------------------------------------------
     t0 = time.time()
     graph = build_graph(bundle)
@@ -118,9 +139,12 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
     # ---- Scorer -------------------------------------------------------
     t0 = time.time()
     apply_classification(cluster.candidates, canonical, graph)
+    confirmed = _apply_consumer_confirmations(cluster.candidates, canonical, store)
     score_candidates(cluster.candidates, canonical, graph, config, as_of)
     step("Scorer", f"{len(cluster.candidates)} candidates scored on weight version "
-                   f"{config.weights.weight_version}", t0, len(cluster.candidates))
+                   f"{config.weights.weight_version}"
+                   + (f"; {confirmed} with a consumer confirmed by a human" if confirmed else ""),
+         t0, len(cluster.candidates))
 
     # Coverage sanity gate can re-tune the clustering resolution before publication.
     coverage, cluster, retuned = _coverage_with_retune(
@@ -166,14 +190,35 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
     result = RunResult(manifest=manifest, graph=graph, canonical=canonical, cluster=cluster,
                        candidates=cluster.candidates, portfolio=portfolio, config=config)
 
+    # ---- Programme ----------------------------------------------------
+    # Prices, sizes and sequences what the other agents found. It runs before
+    # persistence so the effort, value, wave and rank range reach the candidate
+    # payload rather than being recomputed on every read.
+    t0 = time.time()
+    result.programme = enrich_run(result, store=store)
+    stats = _programme_stats(result.programme)
+    step("Programme", f"{stats['candidates_sized']} candidates priced and sized, "
+                      f"{stats['waves']} delivery wave(s), "
+                      f"{stats['raid_entries']} RAID entries, "
+                      f"{stats['currency']} {stats['annual_benefit']:,.0f} attributed "
+                      "annual benefit", t0, len(cluster.candidates))
+    manifest.stats["programme"] = _programme_stats(result.programme)
+
     if store is not None:
-        store.save_weights(config.weights)
-        store.save_run(manifest, label)
-        store.save_graph(run_id, graph)
-        store.save_canonicalization(run_id, canonical)
-        store.save_candidates(run_id, cluster.candidates)
-        if manifest.published:
-            store.publish(run_id)
+        # One transaction: a run that persists no candidates is never published,
+        # and a half-written run cannot be read as a complete one (section 13.1).
+        outcome = store.persist_run(manifest, graph, canonical, cluster.candidates,
+                                    label=label, weights=config.weights)
+        manifest.published = bool(outcome.get("published"))
+        # Re-apply what humans already decided about these metrics and conflicts.
+        seeded = seed_from_ledgers(store, run_id)
+        if seeded:
+            manifest.stats["ledger_seeding"] = seeded
+        if previous_run_id:
+            delta = carry_forward(store, run_id, previous_run_id)
+            manifest.stats["run_delta"] = {
+                k: v for k, v in delta.items() if k != "rows"
+            } if isinstance(delta, dict) else delta
 
     if seed_dir:
         _write_seeds(result, seed_dir, bundle.catalog)
@@ -317,6 +362,82 @@ def _stats(bundle: ExtractBundle, graph: KnowledgeGraph, canonical: Canonicaliza
         "candidates_by_status": statuses,
         "usage_coverage_top_n": coverage,
         "data_gap_metrics": len(cluster.data_gap_metrics),
+    }
+
+
+def _apply_report_overrides(bundle: ExtractBundle, store: Store | None) -> int:
+    """Re-apply reviewer overrides recorded against reports in earlier runs.
+
+    A report marked decision-critical stays decision-critical: the override lives
+    in a run-independent ledger, not in the run that recorded it, which is what
+    makes the section 15.1 mitigation hold across re-runs.
+    """
+    if store is None:
+        return 0
+    overrides = {row["report_id"]: row["value"]
+                 for row in store.report_overrides("decision_critical")}
+    if not overrides:
+        return 0
+    applied = 0
+    for report in bundle.reports:
+        value = overrides.get(report.report_id)
+        if value is not None:
+            report.decision_critical = str(value) in ("1", "true", "True")
+            applied += 1
+    return applied
+
+
+def _apply_consumer_confirmations(candidates: list[Candidate],
+                                  canonical: CanonicalizationResult,
+                                  store: Store | None) -> int:
+    """Mark candidates whose consumer a human has already confirmed.
+
+    Gate G1 asks two things: that the data shows a real consumer, and that a
+    human confirmed one. The second half is a fact about the metric set, not
+    about a run, so it is matched by lineage id and survives re-clustering.
+    """
+    if store is None:
+        return 0
+    confirmed = {row["lineage_id"] for row in store.consumer_confirmations()
+                 if row.get("lineage_id")}
+    if not confirmed:
+        return 0
+    fingerprints = {metric_id: metric.fingerprint
+                    for metric_id, metric in canonical.metrics.items()}
+    applied = 0
+    for candidate in candidates:
+        identity = lineage_id([fingerprints.get(m, m) for m in candidate.metric_ids],
+                              candidate.grain)
+        setattr(candidate, "_lineage_id", identity)
+        if identity in confirmed:
+            setattr(candidate, "_consumer_confirmed", True)
+            applied += 1
+    return applied
+
+
+def _programme_stats(programme: dict) -> dict:
+    """Headline numbers from the programme layer, for the run manifest.
+
+    The benefit reported is the attributed figure, which counts each report and
+    each conflict once across the estate, not the sum of the candidates' own
+    claims - those double-count wherever two candidates cover the same report.
+    """
+    value = programme.get("value") or {}
+    portfolio = value.get("portfolio") or {}
+    waves = programme.get("waves") or {}
+    return {
+        "candidates_sized": len(programme.get("effort") or {}),
+        "waves": len(waves.get("waves") or []),
+        "unscheduled": len(waves.get("unscheduled") or []),
+        "raid_entries": len(programme.get("raid") or []),
+        "dependencies": len(programme.get("dependencies") or []),
+        "currency": value.get("currency", ""),
+        "assumption_version": value.get("assumption_version", ""),
+        "annual_benefit": portfolio.get("attributed_annual_benefit", 0.0),
+        "double_count_removed": portfolio.get("double_count_removed", 0.0),
+        "build_cost": portfolio.get("build_cost", 0.0),
+        "npv_3y": portfolio.get("npv_3y", 0.0),
+        "reports_counted_once": portfolio.get("reports_counted_once", 0),
     }
 
 

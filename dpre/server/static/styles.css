@@ -289,3 +289,13 @@ ul.findings li { margin-bottom: 5px; }
   header.topbar { padding: 10px 16px; }
   .drawer { width: 100vw; }
 }
+
+/* Who the server authenticated. It sits in the top bar because a reviewer
+   should never have to wonder whose name goes on the decision they are about
+   to record. */
+.identity { display: flex; align-items: center; gap: 8px; }
+.identity .who {
+  font-weight: 600; font-size: 12px; letter-spacing: .02em;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}

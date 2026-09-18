@@ -30,16 +30,39 @@ const fmt = {
   date: (v) => v ? String(v).slice(0, 10) : '-',
 };
 
+/* The CSRF header a state-changing request must carry. A cross-origin form
+   cannot set a custom header, so sending one is the whole control. */
+const CSRF_HEADER = 'X-DPRE-Request';
+/* Loopback development identity. On a real deployment the SSO proxy or a
+   bearer token decides who you are and this header is ignored. */
+const IDENTITY_HEADER = 'X-DPRE-Identity';
+
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  const headers = new Headers(options.headers || {});
+  const method = (options.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') headers.set(CSRF_HEADER, '1');
+  if (state.identity) headers.set(IDENTITY_HEADER, state.identity);
+  const response = await fetch(path, { ...options, headers });
   let payload = null;
   try { payload = await response.json(); } catch { payload = null; }
   if (!response.ok) {
-    const message = (payload && (payload.error || payload.message)) || response.statusText;
-    const detail = payload && payload.detail ? ` ${payload.detail}` : '';
-    throw new Error(`${message}${detail}`);
+    if (response.status === 401) { state.principal = null; paintIdentity(); }
+    const error = new Error(problemText(payload, response));
+    error.status = response.status;
+    error.code = payload && payload.code ? payload.code : '';
+    throw error;
   }
   return payload;
+}
+
+/* RFC 9457 problem documents carry title + detail + a stable code. The code is
+   what a client's integration team writes a ticket against, so it is shown. */
+function problemText(payload, response) {
+  if (!payload) return response.statusText || `HTTP ${response.status}`;
+  const head = payload.title || payload.error || payload.message || response.statusText;
+  const detail = payload.detail ? ` ${payload.detail}` : '';
+  const code = payload.code ? ` (${payload.code})` : '';
+  return `${head}${detail}${code}`;
 }
 
 function flash(message, kind = 'info', timeout = 6000) {
@@ -93,9 +116,87 @@ const state = {
   selectedIndustry: 'generic',
   uploads: [],
   schemas: [],
-  reviewer: localStorage.getItem('dpre.reviewer') || '',
+  /* Who the server says you are. A decision is attributed to the principal it
+     authenticated, never to a name typed into the form (R-01). */
+  identity: readIdentity(),
+  principal: null,
   view: 'start',
 };
+
+/* ---------------------------------------------------------------- identity */
+/* The server decides who you are: a trusted proxy header, a bearer token, or -
+   on a loopback development instance - the name you sign in with here. The
+   browser never asserts a reviewer name in a request body, because a decision
+   that anyone can attribute to anyone is not a control. */
+
+function readIdentity() {
+  try { return sessionStorage.getItem('dpre.identity') || ''; } catch { return ''; }
+}
+
+function writeIdentity(name) {
+  state.identity = name;
+  try {
+    if (name) sessionStorage.setItem('dpre.identity', name);
+    else sessionStorage.removeItem('dpre.identity');
+  } catch { /* private mode: the session still works, it just will not persist */ }
+}
+
+async function refreshPrincipal() {
+  try {
+    const payload = await api('/api/v1/whoami');
+    state.principal = payload.principal;
+  } catch (error) {
+    state.principal = null;
+    if (error.status !== 401) throw error;
+  }
+  paintIdentity();
+  return state.principal;
+}
+
+function paintIdentity() {
+  const host = $('#identity');
+  if (!host) return;
+  host.innerHTML = '';
+  const who = state.principal;
+  if (who && who.identity) {
+    host.append(
+      el('span', { class: 'who', title: `${who.roles.join(', ')} · ${who.auth_method}` },
+        who.identity),
+      el('button', { class: 'ghost sm', onclick: signOut }, 'Sign out'));
+  } else {
+    host.append(el('button', { class: 'ghost sm', onclick: signIn }, 'Sign in'));
+  }
+}
+
+async function signIn() {
+  const name = window.prompt(
+    'Your name, as it should appear on every decision you record.\n\n' +
+    'This instance accepts a name only because it is listening on localhost. ' +
+    'A deployed instance takes your identity from single sign-on.',
+    state.identity || '');
+  if (name === null) return;
+  writeIdentity(name.trim());
+  const who = await refreshPrincipal();
+  if (who && who.identity) flash(`Signed in as ${who.identity}.`, 'ok');
+  else flash('The server did not accept that identity.', 'error');
+}
+
+function signOut() {
+  writeIdentity('');
+  state.principal = null;
+  paintIdentity();
+  flash('Signed out. Reading is still open; deciding is not.', 'info');
+}
+
+function requireIdentity(what) {
+  if (state.principal && state.principal.identity) return true;
+  flash(`Sign in before you ${what}: every decision is attributed to a principal.`, 'error');
+  return false;
+}
+
+function mayDo(action) {
+  return Boolean(state.principal && (state.principal.actions || []).includes(action));
+}
 
 /* ------------------------------------------------------------- navigation */
 function showView(name) {
@@ -738,28 +839,55 @@ function tableCard(columns, rows) {
 
 function reviewPanel(data) {
   const candidate = data.candidate;
-  const reviewer = el('input', { value: state.reviewer, placeholder: 'your name' });
-  const reason = el('input', { placeholder: 'reason code, e.g. retires_reports' });
+  const decisionSelect = el('select', {});
+  const reason = el('select', {});
   const note = el('textarea', { rows: 2, placeholder: 'note for the feedback table' });
   const target = el('input', { placeholder: 'merge into candidate id' });
+  const gate = el('input', { placeholder: 'gate waived, e.g. G3' });
+  const waiverReason = el('input', { placeholder: 'why the gate may be waived' });
+  const secondApprover = el('input', { placeholder: 'second approver' });
   const result = el('div', {});
+  const exceptionRow = el('div', { class: 'row', hidden: true },
+    el('label', { class: 'field' }, 'Gate waived', gate),
+    el('label', { class: 'field' }, 'Waiver reason', waiverReason),
+    el('label', { class: 'field' }, 'Second approver', secondApprover));
+  const mergeField = el('label', { class: 'field', hidden: true }, 'Merge target', target);
 
-  async function send(decision, extra = {}) {
-    state.reviewer = reviewer.value.trim();
-    try { localStorage.setItem('dpre.reviewer', state.reviewer); } catch { /* private mode */ }
-    if (!state.reviewer) { result.innerHTML = ''; result.append(el('div', { class: 'banner error' }, 'A decision must name a reviewer: propose-only means acceptance is attributable.')); return; }
+  /* The decision and its reason code come from a closed vocabulary, so a
+     feedback model trained on these rows is reading categories and not prose. */
+  const vocabulary = state.reasonCodes || {};
+  Object.keys(vocabulary).forEach(name => decisionSelect.append(el('option', { value: name }, name)));
+  decisionSelect.value = 'Accept';
+
+  function paintReasons() {
+    const decision = decisionSelect.value;
+    reason.innerHTML = '';
+    reason.append(el('option', { value: '' }, '(no reason code)'));
+    (vocabulary[decision] || []).forEach(code => reason.append(el('option', { value: code }, code)));
+    exceptionRow.hidden = decision !== 'AcceptWithException';
+    mergeField.hidden = decision !== 'Merge';
+  }
+  decisionSelect.onchange = paintReasons;
+  paintReasons();
+
+  async function send(extra = {}) {
+    if (!requireIdentity('record a decision')) return;
+    const decision = decisionSelect.value;
     try {
-      const response = await api(`/api/runs/${state.runId}/review`, {
+      const response = await api(`/api/v1/runs/${state.runId}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          candidate_id: candidate.candidate_id, decision, reviewer: state.reviewer,
-          reason_code: reason.value.trim(), note: note.value.trim(),
-          target_candidate_id: target.value.trim(), ...extra,
+          candidate_id: candidate.candidate_id, decision,
+          reason_code: reason.value, note: note.value.trim(),
+          target_candidate_id: target.value.trim(),
+          gate_waived: gate.value.trim(), waiver_reason: waiverReason.value.trim(),
+          second_approver: secondApprover.value.trim(), ...extra,
         }),
       });
       result.innerHTML = '';
       result.append(el('div', { class: 'banner ok' },
-        `${decision} recorded. Status is now ${response.outcome.status}. ${response.outcome.note || ''}`));
+        `${decision} recorded by ${response.reviewer}. Status is now ` +
+        `${response.outcome.status}. ${response.outcome.note || ''}`));
       state.candidates = [];
       renderBacklog();
     } catch (error) {
@@ -769,47 +897,50 @@ function reviewPanel(data) {
   }
 
   return el('div', { class: 'stack' },
-    el('p', { class: 'secondary small' }, 'The engine proposes; humans decide. No engine path can move a candidate past Proposed — only a review decision written by a named reviewer.'),
+    el('p', { class: 'secondary small' },
+      'The engine proposes; humans decide. No engine path can move a candidate past ' +
+      'Proposed, and the decision is attributed to the principal the server authenticated, ' +
+      'not to a name typed into this form.'),
     el('div', { class: 'row' },
-      el('label', { class: 'field' }, 'Reviewer', reviewer),
+      el('label', { class: 'field' }, 'Decision', decisionSelect),
       el('label', { class: 'field' }, 'Reason code', reason),
-      el('label', { class: 'field' }, 'Merge target', target)),
+      mergeField),
+    exceptionRow,
     el('label', { class: 'field' }, 'Note', note),
     el('div', { class: 'row' },
-      el('button', { class: 'primary', onclick: () => send('Accept') }, 'Accept'),
-      el('button', { onclick: () => send('Reject') }, 'Reject'),
-      el('button', { onclick: () => send('Merge') }, 'Merge'),
-      el('button', { onclick: () => send('Split', { split_by: 'grain' }) }, 'Split by grain'),
-      el('button', { onclick: () => send('Split', { split_by: 'consumer' }) }, 'Split by consumer'),
-      el('button', { onclick: () => send('Defer') }, 'Defer')),
+      el('button', { class: 'primary', onclick: () => send() }, 'Record decision'),
+      el('button', { onclick: () => send({ split_by: 'grain' }) }, 'Split by grain'),
+      el('button', { onclick: () => send({ split_by: 'consumer' }) }, 'Split by consumer')),
     result,
     (data.decisions || []).length ? el('h3', {}, 'Decision history') : null,
     (data.decisions || []).length ? tableCard([
       { label: 'Decision', render: d => d.decision },
       { label: 'Reviewer', render: d => d.reviewer },
       { label: 'Reason', render: d => d.reason_code },
+      { label: 'From', render: d => d.previous_status || '' },
+      { label: 'To', render: d => d.new_status || d.status || '' },
       { label: 'When', render: d => d.decided_at },
       { label: 'Note', render: d => el('span', { class: 'small secondary' }, d.note) },
     ], data.decisions) : null);
 }
 
 async function acceptName(metricId) {
-  if (!state.reviewer) { flash('Set your reviewer name on the Review tab first.', 'error'); return; }
+  if (!requireIdentity('accept a canonical name')) return;
   try {
-    await api(`/api/runs/${state.runId}/metrics/${metricId}/accept-name`, {
+    await api(`/api/v1/runs/${state.runId}/metrics/${metricId}/accept-name`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reviewer: state.reviewer }),
+      body: JSON.stringify({}),
     });
     flash('Name accepted. It may now reach the catalog payload.', 'ok');
   } catch (error) { flash(error.message, 'error'); }
 }
 
 async function markCritical(reportId) {
-  if (!state.reviewer) { flash('Set your reviewer name on the Review tab first.', 'error'); return; }
+  if (!requireIdentity('mark a report decision-critical')) return;
   try {
     await api(`/api/runs/${state.runId}/reports/decision-critical`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ report_id: reportId, reviewer: state.reviewer }),
+      body: JSON.stringify({ report_id: reportId }),
     });
     flash(`${reportId} marked decision-critical: its usage weight is floored on the next run.`, 'ok');
   } catch (error) { flash(error.message, 'error'); }
@@ -1131,12 +1262,17 @@ async function renderFeedback() {
 /* ------------------------------------------------------------------- boot */
 (async function boot() {
   try {
-    const [schemas] = await Promise.all([api('/api/schemas'), loadIndustries()]);
+    paintIdentity();
+    await refreshPrincipal();
+    const [schemas, reasons] = await Promise.all([
+      api('/api/v1/schemas'), api('/api/v1/reason-codes')]);
+    state.reasonCodes = reasons.reason_codes;
+    await loadIndustries();
     state.schemas = schemas.schemas;
     const today = new Date().toISOString().slice(0, 10);
     $('#auto-asof').value = today;
     $('#manual-asof').value = today;
-    const runs = await api('/api/runs');
+    const runs = await api('/api/v1/runs');
     if (runs.runs.length) {
       state.runId = runs.runs[0].run_id;
       state.run = runs.runs[0];
