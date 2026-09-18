@@ -45,6 +45,11 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
     },
     # ---- run quality gates (section 13.2) --------------------------------
     "quality_gate": {
+        "freshness": {
+            "label": "Extracts current",
+            "explanation": "Age of the oldest extract at the as-of date, and the spread "
+                           "between inputs. Lineage taken in March against a catalog taken "
+                           "in June is the usual cause of orphaned report ids."},
         "ingest_reconciliation": {
             "label": "Extracts reconciled",
             "explanation": "Row counts in the extracts match the counts the source tools "

@@ -167,3 +167,86 @@ def test_run_writes_an_executive_pack_a_partner_could_table(tmp_path, capsys):
     # A synthetic run must never read as a client finding, on any page.
     assert "synthetic" in summary.lower()
     assert (folder / "backlog-workbook.xlsx").read_bytes()[:4] == b"PK\x03\x04"
+
+
+def test_assess_reports_what_the_engine_was_fed_and_what_it_missed(db, capsys):
+    assert run_cli(db, "assess", "--limit", "5") == 0
+    out = capsys.readouterr().out
+    assert "Detection against what was planted" in out
+    assert "Remediation plan" in out
+    # The units are named, not identified: a metric id is not something anyone
+    # can look up in a review meeting.
+    assert "how it is recognised" in out
+
+
+def test_assess_exports_the_remediation_plan(db, tmp_path, capsys):
+    target = tmp_path / "plan.csv"
+    assert run_cli(db, "assess", "--csv", str(target)) == 0
+    assert "remediation units written to" in capsys.readouterr().out
+    header = target.read_text(encoding="utf-8").splitlines()[0]
+    assert "owner_role" in header and "action" in header
+
+
+def test_the_registers_name_the_code_that_implements_them(capsys):
+    assert main(["registers", "assumptions", "--limit", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "dpre/config.py" in out and "decision" in out
+
+    assert main(["registers", "traceability", "--limit", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "falsifier" in out.lower()
+
+
+def test_every_control_in_the_matrix_is_present_in_the_code(capsys):
+    """A controls matrix that names a control the code does not have is worse
+    than no matrix: it is an assurance claim nobody can support."""
+    assert main(["registers", "controls", "--limit", "50"]) == 0
+    out = capsys.readouterr().out
+    assert " NO " not in out, out
+    assert "controls verified against the code" in out
+
+
+def test_the_open_decisions_say_what_the_engine_assumes_meanwhile(capsys):
+    assert main(["--db", ":memory:", "registers", "decisions"]) == 0
+    out = capsys.readouterr().out
+    for ref in ("D-01", "D-04", "D-08"):
+        assert ref in out
+    # An open decision is not a blank: the engine has taken a position and says
+    # which one, so a client can disagree with something specific.
+    assert "the engine currently assumes" in out
+
+
+def test_an_engagement_owns_its_runs(db, tmp_path, capsys):
+    path = str(tmp_path / "eng.db")
+    assert run_cli(path, "engagement", "create", "--client", "Acme Utilities",
+                   "--code", "ACM-2026-07", "--cut-date", "2026-09-17",
+                   "--domain", "Customer", "--domain", "Finance",
+                   "--reviewer", "priya.silva:reviewer:Finance", "--actor", "setup") == 0
+    created = capsys.readouterr().out
+    assert "created for Acme Utilities" in created
+    engagement_id = created.split()[1]
+
+    assert run_cli(path, "engagement", "list") == 0
+    listing = capsys.readouterr().out
+    assert "Acme Utilities" in listing and "active" in listing
+    # A run that belongs to nobody is named, because a run nobody owns cannot
+    # be governed.
+    assert "belong to no engagement" not in listing
+
+    assert run_cli(path, "engagement", "close", "--engagement", engagement_id) == 0
+    assert "closed" in capsys.readouterr().out
+
+
+def test_scope_drift_is_reported_against_the_statement_of_work(tmp_path, capsys):
+    path = str(tmp_path / "scope.db")
+    assert run_cli(path, "engagement", "create", "--client", "Acme Utilities",
+                   "--cut-date", "2026-09-17", "--domain", "Customer",
+                   "--domain", "Finance") == 0
+    engagement_id = capsys.readouterr().out.split()[1]
+    run_cli(path, "scope", "--engagement", engagement_id,
+            "--industry", "utility", "--as-of", "2026-09-17")
+    out = capsys.readouterr().out
+    # The catalog export reaches past what the client agreed. That is normal and
+    # it belongs on the run summary rather than in a committee three weeks on.
+    assert "DOMAINS_OUT_OF_SCOPE" in out
+    assert "Metering" in out

@@ -243,8 +243,12 @@ class ScoreWeights:
     features: dict[str, dict[str, float]] = field(
         default_factory=lambda: {k: dict(v) for k, v in FEATURE_WEIGHTS.items()}
     )
-    note: str = "Initial weights: favour products that retire the most reports for the least build risk."
-    approved_by: str = "data product council"
+    note: str = "pending council approval (D-04)"
+    # The shipped vector is a starting point, not a governed decision. The store
+    # seeds v1.0-initial the same way and the audit reports it as outstanding
+    # until a council member approves a version, so the in-memory default must
+    # not claim an approval nobody gave (R-03).
+    approved_by: str = ""
 
     def rows(self) -> list[dict]:
         out = []

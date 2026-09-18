@@ -198,7 +198,7 @@ def test_run_quality_gates_are_all_evaluated(run):
     result, _store = run
     gates = {gate["gate"] for gate in result.manifest.quality_gates}
     assert gates == {"ingest_reconciliation", "resolution_rate", "parse_rate",
-                     "coverage_sanity", "stability"}
+                     "coverage_sanity", "stability", "freshness"}
     assert all(gate["passed"] for gate in result.manifest.quality_gates)
 
 

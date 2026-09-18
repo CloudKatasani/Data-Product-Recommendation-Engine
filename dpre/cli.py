@@ -566,6 +566,195 @@ def cmd_assess(args) -> int:
     return 0
 
 
+def cmd_engagement(args) -> int:
+    """Create, list, show or close an engagement, and attach a run to one.
+
+    A run that belongs to nobody cannot be governed: nothing says whose estate
+    it describes, who agreed the scope, or which date the data was cut.
+    """
+    from .engagement import (EngagementRecord, RosterEntry, attach_run, close_engagement,
+                             engagement_for_run, get_engagement, list_engagements,
+                             save_engagement, unattributed_runs)
+    store = Store(args.db)
+    connection = store.connection
+
+    if args.action == "list":
+        rows = list_engagements(connection, status=args.status)
+        if not rows:
+            print("no engagements recorded yet")
+        else:
+            print(f"\n  {'engagement id':<18} {'client':<26} {'code':<14} {'runs':>5}  status")
+            for row in rows:
+                print(f"    {row['engagement_id']:<16} {row['client'][:24]:<26} "
+                      f"{(row.get('code') or ''):<14} {row.get('runs', 0):>5}  {row['status']}")
+        orphans = unattributed_runs(connection)
+        if orphans:
+            print(f"\n  {len(orphans)} run(s) belong to no engagement: "
+                  + ", ".join(orphans[:6]) + ("..." if len(orphans) > 6 else ""))
+            print("    attach them with 'dpre engagement attach --run RUN --engagement ENG'")
+        store.close()
+        return 0
+
+    if args.action == "create":
+        roster = []
+        for entry in args.reviewer or []:
+            identity, _, rest = entry.partition(":")
+            role, _, domains = rest.partition(":")
+            roster.append(RosterEntry(identity.strip(), (role or "reviewer").strip(),
+                                      tuple(d.strip() for d in domains.split(",") if d.strip())))
+        record = save_engagement(connection, EngagementRecord(
+            client=args.client, code=args.code or "", sponsor=args.sponsor or "",
+            lead_partner=args.partner or "", manager=args.manager or "",
+            start_date=args.start or "", end_date=args.end or "",
+            scope=args.scope or "", data_cut_date=args.cut_date or "",
+            domains=tuple(d.strip() for d in (args.domain or [])),
+            reviewers=tuple(roster)), created_by=args.actor or "")
+        print(f"engagement {record.engagement_id} created for {record.client}")
+        store.close()
+        return 0
+
+    if args.action == "attach":
+        run_id = _run_or_latest(store, args.run)
+        outcome = attach_run(connection, run_id, args.engagement, attached_by=args.actor or "")
+        print(f"run {run_id} attached to {outcome['engagement_id']}")
+        store.close()
+        return 0
+
+    if args.action == "close":
+        record = close_engagement(connection, args.engagement)
+        print(f"engagement {record.engagement_id} is now {record.status}")
+        store.close()
+        return 0
+
+    # show
+    record = (get_engagement(connection, args.engagement) if args.engagement
+              else engagement_for_run(connection, _run_or_latest(store, args.run)))
+    if record is None:
+        print("no engagement found", file=sys.stderr)
+        store.close()
+        return 1
+    print(dumps(record.to_dict() if hasattr(record, "to_dict") else record))
+    store.close()
+    return 0
+
+
+def cmd_scope(args) -> int:
+    """Compare what the client agreed with what the extracts actually contain."""
+    from .engagement import get_engagement, scope_summary
+    store = Store(args.db)
+    record = get_engagement(store.connection, args.engagement)
+    if record is None:
+        print(f"engagement {args.engagement} not found", file=sys.stderr)
+        store.close()
+        return 1
+    if args.mode == "automated":
+        ingest = ingest_automated(args.industry, as_of=_date(args.as_of))
+    else:
+        specs = []
+        for raw in args.input or []:
+            specs.extend(sources_from_workbook(raw, catalog=args.catalog))
+        ingest = ingest_manual(specs, as_of=_date(args.as_of))
+    summary = scope_summary(record, ingest.bundle)
+    print(f"\n  {summary['client']}  (cut date {summary['data_cut_date'] or 'not recorded'}, "
+          f"extract as of {summary['extract_as_of']})")
+    print(f"    {summary['reports']} reports, {summary['kpi_rows']} lineage rows, "
+          f"{summary['catalog_columns']} catalog columns")
+    print(f"    scoped domains: {', '.join(summary['scoped_domains']) or 'none recorded'}")
+    print(f"    in the extract: {', '.join(summary['domains_in_extract'])}")
+    if summary["issues"]:
+        print("\n  Drift between the statement of work and the extract")
+        for issue in summary["issues"]:
+            print(f"    [{issue['severity']:<7}] {issue['code']}: {issue['message']}")
+            if issue["detail"]:
+                print(f"              {issue['detail'][:120]}")
+    print(f"\n    {'in scope and current' if summary['ok'] else 'drift outstanding'}")
+    store.close()
+    return 0 if summary["ok"] else 1
+
+
+def cmd_registers(args) -> int:
+    """The assumptions, open decisions, controls and traceability a client audits."""
+    from . import registers as R
+    which = args.which
+    if which == "assumptions":
+        rows = R.assumption_register(EngineConfig())
+        print(f"\n  Assumption register ({len(rows)} entries)")
+        print(f"    {'key':<36} {'value':>12} {'decision':<9} where it is set")
+        for row in rows[:args.limit]:
+            entry = row if isinstance(row, dict) else row.__dict__
+            print(f"    {str(entry.get('key', ''))[:34]:<36} "
+                  f"{str(entry.get('value', ''))[:12]:>12} "
+                  f"{(entry.get('decision_ref') or '-'):<9} "
+                  f"{(entry.get('implemented_in') or '')[:48]}")
+            if args.detail:
+                print(f"           {entry.get('description', '')}")
+        print(f"\n    Every figure a reviewer could contest is here with the file that sets "
+              "it. A 'decision' reference points at the open decision that would change it.")
+        return 0
+    if which == "decisions":
+        store = Store(args.db)
+        rows = R.decision_register(EngineConfig(), connection=store.connection)
+        openish = R.open_decisions(rows)
+        print(f"\n  Open decisions D-01..D-08 ({len(openish)} of {len(rows)} still open)")
+        open_refs = {row["ref"] for row in openish}
+        for row in rows:
+            state = "open" if row["ref"] in open_refs else "decided"
+            print(f"    [{state:<7}] {row['ref']}  {row['title'][:74]}")
+            print(f"              matters because: {row['why_it_matters'][:70]}")
+            if state == "decided":
+                print(f"              {row.get('position', '')} "
+                      f"- {row.get('decided_by', '')}, {row.get('decided_at', '')[:10]}")
+            else:
+                print(f"              the engine currently assumes: "
+                      f"{str(row.get('engine_position', ''))[:60]}")
+        store.close()
+        return 0
+    if which == "controls":
+        rows = R.controls_matrix()
+        verified = {v["control_id"]: v for v in R.verify_controls()}
+        print(f"\n  Controls matrix ({len(rows)} controls)")
+        print(f"    {'id':<7} {'kind':<11} {'in code':<8} objective")
+        for row in rows[:args.limit]:
+            check = verified.get(row["control_id"], {})
+            mark = "yes" if check.get("present") else ("NO" if check else "-")
+            print(f"    {row['control_id']:<7} {row['kind']:<11} {mark:<8} "
+                  f"{row['objective'][:58]}")
+            if args.detail:
+                print(f"           {row['control'][:110]}")
+                print(f"           tested by: {', '.join(row['proving_tests'][:2])}")
+        missing = [c for c in verified.values() if not c.get("present")]
+        print(f"\n    {len(verified) - len(missing)} of {len(verified)} controls verified "
+              "against the code")
+        return 0 if not missing else 1
+    if which == "raci":
+        for row in R.raci():
+            print(f"    {row.get('activity', '')[:54]:<54} "
+                  + " ".join(f"{k}={v}" for k, v in row.items() if k != "activity"))
+        return 0
+    if which == "frameworks":
+        for framework, mapping in R.framework_mapping().items():
+            print(f"\n  {framework}")
+            for area, controls in mapping.items():
+                print(f"    {area[:46]:<46} {', '.join(controls)}")
+        return 0
+    # traceability
+    rows = R.traceability_matrix()
+    provable = [r for r in rows if r.get("provable")]
+    print(f"\n  Traceability to the specification "
+          f"({len(provable)} of {len(rows)} criteria provable from a run)")
+    print(f"    {'ref':<8} {'phase':<6} {'kind':<10} {'provable':<9} criterion")
+    for row in rows[:args.limit]:
+        print(f"    {row['ref']:<8} {row['phase']:<6} {row['kind']:<10} "
+              f"{('yes' if row['provable'] else 'no'):<9} {row['criterion'][:52]}")
+        if args.detail:
+            print(f"           threshold {row['threshold']}  in {row['feature']}")
+            if row.get("note"):
+                print(f"           {row['note']}")
+    print("\n    A falsifier is a criterion that would sink the phase if it came true, and "
+          "it is listed beside the exit criteria on purpose.")
+    return 0
+
+
 def cmd_audit(args) -> int:
     """Verify the hash chain and print what an audit function would ask for."""
     store = Store(args.db)
@@ -811,6 +1000,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run")
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_value)
+
+    p = subparsers.add_parser("engagement", help="whose estate this is, and who agreed the scope")
+    p.add_argument("action", choices=["list", "create", "show", "attach", "close"])
+    p.add_argument("--engagement", help="engagement id")
+    p.add_argument("--run")
+    p.add_argument("--status", choices=["active", "closed"])
+    p.add_argument("--client")
+    p.add_argument("--code")
+    p.add_argument("--sponsor")
+    p.add_argument("--partner")
+    p.add_argument("--manager")
+    p.add_argument("--start")
+    p.add_argument("--end")
+    p.add_argument("--scope")
+    p.add_argument("--cut-date", dest="cut_date", help="the date the client cut the data")
+    p.add_argument("--domain", action="append", help="an in-scope domain; repeat for several")
+    p.add_argument("--reviewer", action="append",
+                   help="identity:role:domain,domain - repeat for each roster entry")
+    p.add_argument("--actor", help="who is recording this")
+    p.set_defaults(func=cmd_engagement)
+
+    p = subparsers.add_parser("scope", help="agreed scope against what the extracts contain")
+    p.add_argument("--engagement", required=True)
+    p.add_argument("--mode", default="automated", choices=["manual", "automated"])
+    p.add_argument("--industry", default="generic", choices=list(INDUSTRY_KEYS))
+    p.add_argument("--input", action="append")
+    p.add_argument("--catalog", default="collibra", choices=["collibra", "alation"])
+    p.add_argument("--as-of", dest="as_of")
+    p.set_defaults(func=cmd_scope)
+
+    p = subparsers.add_parser("registers",
+                              help="assumptions, open decisions, controls, RACI, traceability")
+    p.add_argument("which", choices=["assumptions", "decisions", "controls", "raci",
+                                     "frameworks", "traceability"])
+    p.add_argument("--limit", type=int, default=40)
+    p.add_argument("--detail", action="store_true")
+    p.set_defaults(func=cmd_registers)
 
     p = subparsers.add_parser("assess",
                               help="what the run's inputs, blind spots and gaps look like")

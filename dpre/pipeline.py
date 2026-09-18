@@ -40,6 +40,7 @@ from .programme import enrich_run
 from .narrate.critic import critique
 from .narrate.narrator import narrate
 from .portfolio.views import portfolio_views
+from .quality.replay import replay_record
 from .quality import (bias_register, detection_scorecard, dq_scorecard, remediation_plan,
                       save_detection_scorecard, save_dq_scorecard, save_remediation_plan,
                       save_stewardship_requests, stewardship_register)
@@ -180,7 +181,18 @@ def run_pipeline(ingest: IngestResult, config: EngineConfig | None = None,
 
     # ---- quality gates and manifest -----------------------------------
     gates = _quality_gates(ingest, graph, canonical, cluster, coverage, store, previous_run_id)
+
+    # Replayability (R-32): the manifest carried the parser and weight versions
+    # but not the clustering configuration, so a run tuned with a different
+    # resolution could not be told from one that was not. The snapshot and its
+    # hash go on the manifest, and a stale extract is a gate rather than a
+    # surprise discovered in a committee.
+    replay = replay_record(bundle, config,
+                           effective_resolution=cluster.stats.get("effective_resolution"),
+                           as_of=as_of)
+    gates.append(replay["freshness"])
     stats = _stats(bundle, graph, canonical, cluster, coverage)
+    stats["replay"] = {k: v for k, v in replay.items() if k != "freshness"}
     manifest = RunManifest(
         run_id=run_id, mode=bundle.mode, industry=bundle.industry, catalog=bundle.catalog,
         as_of_date=as_of.isoformat(), started_at=started.isoformat(timespec="seconds"),
