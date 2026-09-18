@@ -390,6 +390,13 @@ LABELS: dict[str, dict[str, dict[str, str]]] = {
         "G4 Sunset source": {"label": "Gate G4 failed", "explanation": "See gate G4."},
     },
     "severity": {
+        # The critic grades findings blocker/major/minor/info; the RAID log grades
+        # risks high/medium/low. One category covers both, so a client never sees
+        # two scales for the same idea.
+        "high": {"label": "High", "explanation": "Likely, and it would hurt: mitigate now."},
+        "medium": {"label": "Medium",
+                   "explanation": "Real but containable; assign an owner this wave."},
+        "low": {"label": "Low", "explanation": "Watch it; no action this wave."},
         "blocker": {"label": "Blocker", "explanation": "Stops Stage 2 exit until resolved."},
         "major": {"label": "Major", "explanation": "A reviewer will send it back."},
         "minor": {"label": "Minor", "explanation": "Worth fixing; will not stop acceptance."},

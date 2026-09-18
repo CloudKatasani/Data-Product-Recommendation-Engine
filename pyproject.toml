@@ -4,24 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "data-product-recommendation-engine"
-version = "1.0.0"
+dynamic = ["version"]                      # single-sourced from dpre.__version__ (R-52)
 description = "Turns report-level KPI lineage and catalog metadata into a ranked, evidence-backed backlog of data product candidates."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
 keywords = ["data products", "data mesh", "cognos", "power bi", "collibra", "alation", "lineage"]
-dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Private :: Do Not Upload",
+]
+dependencies = []                          # stdlib only: see docs/security.md
 
 [project.optional-dependencies]
-test = ["pytest>=8", "pyyaml>=6"]
+# Pinned so a CI run is reproducible and an auditor can tell what was tested.
+test = ["pytest>=8.0,<9.0", "pyyaml>=6.0,<7.0"]
+lint = ["pyflakes>=3.2,<4.0"]
+
+[project.urls]
+Documentation = "https://example.invalid/dpre/docs"
 
 [project.scripts]
 dpre = "dpre.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "dpre.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["dpre*"]
 
 [tool.setuptools.package-data]
+# py.typed marks the package as typed for downstream consumers (PEP 561).
+"dpre" = ["py.typed"]
 "dpre.server" = ["static/*"]
 
 [tool.pytest.ini_options]

@@ -3,12 +3,21 @@
 The synthetic data pack (specification section 17) ships as one workbook per
 industry and manual-mode users upload workbooks, so the engine needs both
 directions without pulling in a third-party dependency.
+
+Reading is *bounded* (R-30). A workbook is a zip archive of XML, so a 500 KB
+upload can inflate to hundreds of megabytes and take the review server down
+with it. Every member is checked against a decompressed-size ceiling and a
+compression-ratio ceiling before it is read, the read itself is capped, the
+whole archive has a budget, and a sheet stops at a row limit. The ceilings live
+in :class:`Limits` so an operator can raise them for a genuinely large estate
+without editing code.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import re
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -17,6 +26,30 @@ NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 _CELL_RE = re.compile(r"([A-Z]+)(\d+)")
 _ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+class WorkbookTooLarge(ValueError):
+    """A workbook exceeds the bounds this engine will spend memory on."""
+
+
+@dataclass(frozen=True)
+class Limits:
+    """Ceilings applied to one workbook while it is read.
+
+    ``max_ratio`` is the guard that a size header cannot defeat: a member
+    compressing better than this is a zip bomb, not an extract. ``max_member_bytes``
+    and ``max_total_bytes`` bound one part and the archive; ``max_rows_per_sheet``
+    bounds what reaches the ingestion layer.
+    """
+
+    max_member_bytes: int = 64 * 1024 * 1024
+    max_total_bytes: int = 256 * 1024 * 1024
+    max_ratio: int = 200
+    max_rows_per_sheet: int = 1_000_000
+    max_members: int = 512
+
+
+DEFAULT_LIMITS = Limits()
 
 
 def _col_to_index(ref: str) -> int:
@@ -187,9 +220,66 @@ def write_workbook(path: str | Path, sheets: dict[str, list[list]]) -> Path:
 # Reading
 # --------------------------------------------------------------------------
 
-def _read_shared_strings(zf: zipfile.ZipFile) -> list[str]:
+class _Budget:
+    """How many decompressed bytes this archive may still spend."""
+
+    def __init__(self, limits: Limits) -> None:
+        self.limits = limits
+        self.remaining = limits.max_total_bytes
+
+    def spend(self, size: int, member: str) -> None:
+        self.remaining -= size
+        if self.remaining < 0:
+            raise WorkbookTooLarge(
+                f"the workbook expands beyond {self.limits.max_total_bytes} bytes "
+                f"(reading '{member}')")
+
+
+def _read_member(zf: zipfile.ZipFile, member: str, limits: Limits,
+                 budget: "_Budget") -> bytes:
+    """Read one archive member within the size and ratio ceilings.
+
+    The declared size is checked first because it is free, then the read itself
+    is capped one byte beyond the ceiling, because a crafted archive can lie in
+    its directory but cannot lie about the bytes it produces.
+    """
+    info = zf.getinfo(member)
+    if info.file_size > limits.max_member_bytes:
+        raise WorkbookTooLarge(
+            f"'{member}' declares {info.file_size} bytes, over the "
+            f"{limits.max_member_bytes} byte limit for one part")
+    if info.compress_size > 0:
+        ratio = info.file_size / info.compress_size
+        if ratio > limits.max_ratio:
+            raise WorkbookTooLarge(
+                f"'{member}' expands {ratio:.0f}x, over the {limits.max_ratio}x limit; "
+                "this is not a spreadsheet")
+    with zf.open(member) as handle:
+        data = handle.read(limits.max_member_bytes + 1)
+    if len(data) > limits.max_member_bytes:
+        raise WorkbookTooLarge(
+            f"'{member}' expands past the {limits.max_member_bytes} byte limit for one part")
+    budget.spend(len(data), member)
+    return data
+
+
+def _open_workbook(path: str | Path, limits: Limits) -> tuple[zipfile.ZipFile, "_Budget"]:
+    """Open the archive and refuse one with an implausible number of members."""
+    zf = zipfile.ZipFile(path)
     try:
-        raw = zf.read("xl/sharedStrings.xml")
+        names = zf.namelist()
+        if len(names) > limits.max_members:
+            raise WorkbookTooLarge(
+                f"the workbook holds {len(names)} parts, over the {limits.max_members} limit")
+    except Exception:
+        zf.close()
+        raise
+    return zf, _Budget(limits)
+
+
+def _read_shared_strings(zf: zipfile.ZipFile, limits: Limits, budget: "_Budget") -> list[str]:
+    try:
+        raw = _read_member(zf, "xl/sharedStrings.xml", limits, budget)
     except KeyError:
         return []
     root = ET.fromstring(raw)
@@ -199,19 +289,27 @@ def _read_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     return out
 
 
-def sheet_names(path: str | Path) -> list[str]:
-    with zipfile.ZipFile(path) as zf:
-        root = ET.fromstring(zf.read("xl/workbook.xml"))
+def sheet_names(path: str | Path, limits: Limits | None = None) -> list[str]:
+    limits = limits or DEFAULT_LIMITS
+    zf, budget = _open_workbook(path, limits)
+    with zf:
+        root = ET.fromstring(_read_member(zf, "xl/workbook.xml", limits, budget))
         return [s.get("name", "") for s in root.iter(f"{{{NS_MAIN}}}sheet")]
 
 
-def read_workbook(path: str | Path) -> dict[str, list[list]]:
-    """Read every sheet into ``{sheet_name: rows}`` of Python scalars."""
+def read_workbook(path: str | Path, limits: Limits | None = None) -> dict[str, list[list]]:
+    """Read every sheet into ``{sheet_name: rows}`` of Python scalars.
+
+    Raises :class:`WorkbookTooLarge` rather than spending unbounded memory on a
+    hostile or merely enormous upload (R-30).
+    """
+    limits = limits or DEFAULT_LIMITS
     out: dict[str, list[list]] = {}
-    with zipfile.ZipFile(path) as zf:
-        strings = _read_shared_strings(zf)
-        wb = ET.fromstring(zf.read("xl/workbook.xml"))
-        rel_root = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    zf, budget = _open_workbook(path, limits)
+    with zf:
+        strings = _read_shared_strings(zf, limits, budget)
+        wb = ET.fromstring(_read_member(zf, "xl/workbook.xml", limits, budget))
+        rel_root = ET.fromstring(_read_member(zf, "xl/_rels/workbook.xml.rels", limits, budget))
         targets = {
             r.get("Id"): r.get("Target", "")
             for r in rel_root.findall(f"{{{NS_PKG_REL}}}Relationship")
@@ -222,17 +320,22 @@ def read_workbook(path: str | Path) -> dict[str, list[list]]:
             target = targets.get(rid, f"worksheets/sheet{order}.xml").lstrip("/")
             member = target if target.startswith("xl/") else f"xl/{target}"
             try:
-                data = zf.read(member)
+                data = _read_member(zf, member, limits, budget)
             except KeyError:
                 continue
-            out[name] = _parse_sheet(data, strings)
+            out[name] = _parse_sheet(data, strings, limits)
     return out
 
 
-def _parse_sheet(data: bytes, strings: list[str]) -> list[list]:
+def _parse_sheet(data: bytes, strings: list[str], limits: Limits | None = None) -> list[list]:
+    limits = limits or DEFAULT_LIMITS
     root = ET.fromstring(data)
     rows: list[list] = []
     for row in root.iter(f"{{{NS_MAIN}}}row"):
+        if len(rows) >= limits.max_rows_per_sheet:
+            raise WorkbookTooLarge(
+                f"a sheet carries more than {limits.max_rows_per_sheet} rows; "
+                "split the extract")
         values: list = []
         for cell in row.findall(f"{{{NS_MAIN}}}c"):
             idx = _col_to_index(cell.get("r", "")) if cell.get("r") else len(values)
@@ -265,9 +368,10 @@ def _parse_sheet(data: bytes, strings: list[str]) -> list[list]:
     return rows
 
 
-def read_sheet_records(path: str | Path, sheet: str) -> list[dict]:
+def read_sheet_records(path: str | Path, sheet: str,
+                       limits: Limits | None = None) -> list[dict]:
     """Read one sheet as dict records keyed by the header row."""
-    rows = read_workbook(path).get(sheet, [])
+    rows = read_workbook(path, limits).get(sheet, [])
     return rows_to_records(rows)
 
 

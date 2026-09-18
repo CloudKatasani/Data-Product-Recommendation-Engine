@@ -1,4 +1,9 @@
-"""The HTTP API, exercised against a live server on a loopback port."""
+"""The HTTP API, exercised against a live server on a loopback port.
+
+Every request here carries what the hardened surface now requires (R-01, R-29):
+a dev identity header, which loopback accepts, and ``X-DPRE-Request`` on every
+state-changing POST. The refusals themselves live in ``tests/test_security.py``.
+"""
 from __future__ import annotations
 
 import json
@@ -12,12 +17,16 @@ import pytest
 from dpre.server.app import Handler, Workspace, build_router
 from dpre.server.multipart import parse
 
+IDENTITY = "dev.reviewer"
+
 
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
     workspace = Workspace(tmp_path_factory.mktemp("server"))
     Handler.workspace = workspace
     Handler.routes = build_router(workspace)
+    Handler.policy = None                      # rebuilt from the bound socket
+    Handler.settings = None
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -26,25 +35,42 @@ def server(tmp_path_factory):
     httpd.shutdown()
     httpd.server_close()
     workspace.store.close()
+    Handler.policy = None
 
 
-def get(base: str, path: str):
-    with urllib.request.urlopen(f"{base}{path}", timeout=90) as response:
+def get(base: str, path: str, identity: str = IDENTITY, **headers):
+    request = urllib.request.Request(f"{base}{path}", method="GET",
+                                     headers={"X-DPRE-Identity": identity, **headers})
+    with urllib.request.urlopen(request, timeout=90) as response:
         return json.loads(response.read())
 
 
-def post(base: str, path: str, payload: dict):
+def post(base: str, path: str, payload: dict, identity: str = IDENTITY, **headers):
     request = urllib.request.Request(
         f"{base}{path}", data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
+        headers={"Content-Type": "application/json", "X-DPRE-Request": "1",
+                 "X-DPRE-Identity": identity, **headers}, method="POST")
     with urllib.request.urlopen(request, timeout=180) as response:
         return json.loads(response.read())
+
+
+@pytest.fixture(scope="module")
+def run_id(server):
+    """One automated run the read tests share, so no test depends on another."""
+    base, _ = server
+    result = post(base, "/api/v1/run/automated",
+                  {"industry": "insurance", "as_of": "2026-09-17", "catalog": "collibra"})
+    assert result["ok"] is True
+    return result["run_id"]
 
 
 def test_static_application_is_served(server):
     base, _ = server
     with urllib.request.urlopen(f"{base}/", timeout=30) as response:
         page = response.read().decode()
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert "default-src 'self'" in response.headers["Content-Security-Policy"]
     assert "Data Product Recommendation Engine" in page
     assert 'data-view="backlog"' in page
     for asset in ("/app.js", "/styles.css"):
@@ -86,15 +112,30 @@ def test_reference_endpoints(server):
     assert get(base, "/api/semantic-view")["queries"]
 
 
-def test_automated_run_and_the_views_it_feeds(server):
+def test_versioned_and_legacy_prefixes_serve_the_same_route(server):
+    """`/api/v1` is canonical; `/api` stays an alias for one release (R-31)."""
     base, _ = server
-    result = post(base, "/api/run/automated",
-                  {"industry": "insurance", "as_of": "2026-09-17", "catalog": "collibra"})
-    assert result["ok"] is True
-    run_id = result["run_id"]
-    assert result["candidates"] and result["portfolio"]["coverage_curve"]
-    assert all(gate["passed"] for gate in result["summary"]["quality_gates"])
+    assert get(base, "/api/v1/industries") == get(base, "/api/industries")
+    assert get(base, "/api/v1/version")["api_version"] == "v1"
+    assert get(base, "/api/v1/ready")["status"] == "ready"
 
+
+def test_openapi_document_describes_the_router(server):
+    base, _ = server
+    document = get(base, "/api/v1/openapi.json")
+    assert document["openapi"] == "3.1.0"
+    paths = document["paths"]
+    assert "/api/v1/runs/{run_id}/candidates" in paths
+    assert "/api/v1/runs/{run_id}/candidates/{candidate_id}/seeds/{name}" in paths
+    assert "/api/download" not in paths
+    approve = paths["/api/v1/weights/approve"]["post"]
+    assert "approve_weights" in approve["description"]
+    assert any(p.get("$ref", "").endswith("/csrf") for p in approve["parameters"])
+    assert "bearerToken" in document["components"]["securitySchemes"]
+
+
+def test_automated_run_and_the_views_it_feeds(server, run_id):
+    base, _ = server
     candidates = get(base, f"/api/runs/{run_id}/candidates")["candidates"]
     assert candidates
     detail = get(base, f"/api/runs/{run_id}/candidates/{candidates[0]['candidate_id']}")
@@ -106,27 +147,83 @@ def test_automated_run_and_the_views_it_feeds(server):
     assert get(base, f"/api/runs/{run_id}/conflicts")["conflicts"]
 
 
-def test_review_requires_a_named_reviewer(server):
+def test_list_routes_page(server, run_id):
     base, _ = server
-    run_id = get(base, "/api/runs")["runs"][0]["run_id"]
+    full = get(base, f"/api/v1/runs/{run_id}/candidates")
+    assert full["page"]["total"] == len(full["candidates"])
+    first = get(base, f"/api/v1/runs/{run_id}/candidates?limit=1")
+    assert len(first["candidates"]) == 1
+    assert first["page"] == {"limit": 1, "offset": 0, "total": full["page"]["total"],
+                             "returned": 1}
+    second = get(base, f"/api/v1/runs/{run_id}/candidates?limit=1&offset=1")
+    assert second["candidates"][0]["candidate_id"] != first["candidates"][0]["candidate_id"]
+    assert get(base, "/api/v1/runs")["page"]["total"] >= 1
+
+
+def test_review_identity_comes_from_the_principal_not_the_body(server, run_id):
+    """R-01: the reviewer is who authenticated, whatever the body claims."""
+    base, _ = server
     candidate_id = get(base, f"/api/runs/{run_id}/candidates")["candidates"][0]["candidate_id"]
-    with pytest.raises(urllib.error.HTTPError) as excinfo:
-        post(base, f"/api/runs/{run_id}/review",
-             {"candidate_id": candidate_id, "decision": "Accept"})
-    assert excinfo.value.code == 400
     outcome = post(base, f"/api/runs/{run_id}/review",
                    {"candidate_id": candidate_id, "decision": "Accept",
-                    "reviewer": "priya.silva", "reason_code": "value_clear"})
+                    "reviewer": "someone.else", "reason_code": "value_clear"},
+                   identity="priya.silva")
     assert outcome["outcome"]["status"] == "Accepted"
+    assert outcome["outcome"]["reviewer"] == "priya.silva"
+    assert outcome["reviewer"] == "priya.silva"
+    decisions = get(base, f"/api/v1/runs/{run_id}/decisions")["decisions"]
+    assert "someone.else" not in {d["reviewer"] for d in decisions}
 
 
-def test_chat_answers_cite_evidence(server):
+def test_seed_download_is_keyed_by_run_and_candidate(server, run_id):
+    """R-05: no path parameter anywhere; the server composes the path."""
     base, _ = server
-    run_id = get(base, "/api/runs")["runs"][0]["run_id"]
+    candidates = get(base, f"/api/runs/{run_id}/candidates")["candidates"]
+    detail = get(base, f"/api/runs/{run_id}/candidates/{candidates[0]['candidate_id']}")
+    seed = detail["seeds"][0]
+    assert seed["download"].startswith(f"/api/v1/runs/{run_id}/candidates/")
+    request = urllib.request.Request(f"{base}{seed['download']}", method="GET",
+                                     headers={"X-DPRE-Identity": IDENTITY})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = response.read()
+        assert response.headers["Content-Disposition"].startswith("attachment")
+    assert len(body) == seed["size"]
+
+
+def test_synthetic_workbook_download_is_mapped_server_side(server):
+    base, _ = server
+    described = get(base, "/api/v1/synthetic/retail/workbook")
+    assert described["download"] == "/api/v1/synthetic/retail/workbook/download"
+    assert "path" not in described
+    request = urllib.request.Request(f"{base}{described['download']}", method="GET",
+                                     headers={"X-DPRE-Identity": IDENTITY})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        assert response.read()[:4] == b"PK\x03\x04"
+
+
+def test_chat_answers_cite_evidence(server, run_id):
+    base, _ = server
     answer = post(base, "/api/chat",
                   {"question": "which candidates retire the most reports", "run_id": run_id})
     assert answer["citations"]
     assert "semantic view" in answer["bound_to"]
+
+
+def upload_workbook(base: str, path, filename: str = "retail.xlsx"):
+    boundary = "----dpretest"
+    body = b""
+    body += f"--{boundary}\r\n".encode()
+    body += (f'Content-Disposition: form-data; name="files"; filename="{filename}"\r\n'
+             ).encode()
+    body += b"Content-Type: application/octet-stream\r\n\r\n"
+    body += path.read_bytes() + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    request = urllib.request.Request(
+        f"{base}/api/upload", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "X-DPRE-Request": "1", "X-DPRE-Identity": IDENTITY})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return json.loads(response.read())
 
 
 def test_manual_upload_and_run(server, tmp_path):
@@ -137,24 +234,19 @@ def test_manual_upload_and_run(server, tmp_path):
 
     pack = generate_pack("retail", as_of=_dt.date(2026, 9, 17))
     path = write_pack_workbook(pack, tmp_path / "retail.xlsx")
-    boundary = "----dpretest"
-    body = b""
-    body += f"--{boundary}\r\n".encode()
-    body += b'Content-Disposition: form-data; name="files"; filename="retail.xlsx"\r\n'
-    body += b"Content-Type: application/octet-stream\r\n\r\n"
-    body += path.read_bytes() + b"\r\n"
-    body += f"--{boundary}--\r\n".encode()
-    request = urllib.request.Request(
-        f"{base}/api/upload", data=body, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        uploaded = json.loads(response.read())
+    uploaded = upload_workbook(base, path)
 
-    tables = uploaded["files"][0]["tables"]
+    entry = uploaded["files"][0]
+    assert "path" not in entry, "an upload must never hand back a server path (R-05)"
+    assert entry["upload_id"] and entry["sha256"]
+    tables = entry["tables"]
     detected = {t["suggested_schema"] for t in tables if t["suggested_schema"]}
     assert {"cognos_rationalization", "cognos_kpi_lineage", "collibra_metadata"} <= detected
 
-    sources = [{"path": uploaded["files"][0]["path"], "schema_key": t["suggested_schema"],
+    inspected = post(base, f"/api/v1/uploads/{entry['upload_id']}/inspect", {})
+    assert inspected["upload_id"] == entry["upload_id"]
+
+    sources = [{"upload_id": entry["upload_id"], "schema_key": t["suggested_schema"],
                 "sheet": t["sheet"], "mapping": t["mapping"]}
                for t in tables
                if t["suggested_schema"] and t["confidence"] >= 0.4
@@ -163,6 +255,10 @@ def test_manual_upload_and_run(server, tmp_path):
     assert result["ok"] is True
     assert result["candidates"]
     assert result["summary"]["mode"] == "manual"
+    # R-26: the client's extract is not kept after it has been ingested.
+    assert result["uploads_deleted"] == [entry["upload_id"]]
+    assert workspace.registry.get(entry["upload_id"]) is None
+    assert not list(workspace.uploads.glob("*"))
 
 
 def test_manual_run_without_lineage_is_refused(server):
@@ -170,13 +266,31 @@ def test_manual_run_without_lineage_is_refused(server):
     with pytest.raises(urllib.error.HTTPError) as excinfo:
         post(base, "/api/run/manual", {"sources": []})
     assert excinfo.value.code == 400
+    problem = json.loads(excinfo.value.read())
+    assert problem["code"] == "DPRE-RUN-001"
+    assert problem["type"].endswith("dpre-run-001")
 
 
-def test_download_is_confined_to_the_workspace(server):
+def test_the_path_download_route_is_gone(server):
+    """R-05: /api/download served the database; it no longer exists."""
     base, _ = server
-    with pytest.raises(urllib.error.HTTPError) as excinfo:
-        urllib.request.urlopen(f"{base}/api/download?path=/etc/passwd", timeout=30)
-    assert excinfo.value.code == 404
+    for target in ("/api/download?path=/etc/passwd",
+                   f"/api/download?path={_db_path(server)}"):
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(f"{base}{target}", timeout=30)
+        assert excinfo.value.code == 404
+
+
+def _db_path(server) -> str:
+    _, workspace = server
+    return str(workspace.settings.database)
+
+
+def test_the_database_lives_outside_anything_served(server):
+    _, workspace = server
+    assert workspace.settings.database.parent == workspace.private
+    assert not (workspace.root / "engine.db").exists()
+    assert workspace.uploads.parent == workspace.private
 
 
 def test_multipart_parser_reads_fields_and_files():
@@ -194,12 +308,9 @@ def test_multipart_parser_reads_fields_and_files():
     assert parts[1].content.startswith(b"id,name")
 
 
-def test_conflicts_remain_readable_and_resolvable_through_the_api(server):
+def test_conflicts_remain_readable_and_resolvable_through_the_api(server, run_id):
     """The register is still produced, cited and adjudicable outside the browser."""
     base, _ = server
-    runs = get(base, "/api/runs")["runs"]
-    run_id = runs[0]["run_id"] if runs else post(
-        base, "/api/run/automated", {"industry": "utility", "as_of": "2026-09-17"})["run_id"]
     conflicts = get(base, f"/api/runs/{run_id}/conflicts")["conflicts"]
     assert conflicts
     conflict = conflicts[0]
@@ -207,19 +318,14 @@ def test_conflicts_remain_readable_and_resolvable_through_the_api(server):
     assert conflict["resolution_status"] == "OPEN"
 
     resolved = post(base, f"/api/runs/{run_id}/conflicts/{conflict['conflict_id']}/resolve",
-                    {"status": "RESOLVED_A", "reviewer": "priya.silva",
-                     "note": "definition A is the certified basis"})
+                    {"status": "RESOLVED_A", "reviewer": "ignored.name",
+                     "note": "Side A matches the certified definition."},
+                    identity="priya.silva")
     assert resolved["status"] == "RESOLVED_A"
+    assert resolved["reviewer"] == "priya.silva"   # not the name in the body (R-01)
     after = get(base, f"/api/runs/{run_id}/conflicts")["conflicts"]
     updated = next(c for c in after if c["conflict_id"] == conflict["conflict_id"])
     assert updated["resolution_status"] == "RESOLVED_A"
-
-    # The closed vocabulary and the rationale requirement are enforced, not advisory.
-    for bad in ({"status": "RESOLVED", "reviewer": "priya.silva", "note": "n"},
-                {"status": "RESOLVED_B", "reviewer": "priya.silva"}):
-        with pytest.raises(urllib.error.HTTPError) as excinfo:
-            post(base, f"/api/runs/{run_id}/conflicts/{conflict['conflict_id']}/resolve", bad)
-        assert excinfo.value.code == 400
 
     # And the heat map still ranks them by usage at stake.
     assert get(base, f"/api/runs/{run_id}/portfolio")["conflict_heat_map"]

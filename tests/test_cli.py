@@ -146,3 +146,24 @@ def test_an_accepted_candidate_gets_a_benefit_plan_to_be_held_to(db, capsys):
     out = capsys.readouterr().out
     assert "Benefit realisation" in out
     assert "/" in out          # realised over planned, both present
+
+
+def test_run_writes_an_executive_pack_a_partner_could_table(tmp_path, capsys):
+    """The pack is cut in the same process as the run, so the cover and the
+    store cannot disagree about what the engine found."""
+    out = tmp_path / "packs"
+    assert main(["--db", str(tmp_path / "pack.db"), "run", "automated",
+                 "--industry", "retail", "--as-of", "2026-09-17",
+                 "--workspace", str(tmp_path / "ws"),
+                 "--pack", str(out), "--client", "Northwind Retail",
+                 "--partner", "A. Partner"]) == 0
+    assert "executive pack written to" in capsys.readouterr().out
+    folder = next(out.iterdir())
+    names = {p.name for p in folder.iterdir()}
+    assert {"executive-summary.md", "executive-summary.html",
+            "backlog-workbook.xlsx", "dossiers", "README.md"} <= names
+    summary = (folder / "executive-summary.md").read_text(encoding="utf-8")
+    assert summary.startswith("# Northwind Retail")
+    # A synthetic run must never read as a client finding, on any page.
+    assert "synthetic" in summary.lower()
+    assert (folder / "backlog-workbook.xlsx").read_bytes()[:4] == b"PK\x03\x04"

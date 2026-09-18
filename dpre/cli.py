@@ -161,6 +161,22 @@ def cmd_run(args) -> int:
         for candidate in result.candidates:
             write_seeds(candidate, result.canonical, result.graph, base, ingest.bundle.catalog)
         print(f"\n  seeds written to {base}")
+    if args.pack:
+        # The pack is cut from the run that produced it, in the same process,
+        # so the numbers on the cover and the numbers in the store cannot drift.
+        from .export import write_pack
+        from .export.engagement import Engagement
+        engagement = Engagement(
+            client=args.client or "Client",
+            engagement=args.engagement or "Data product rationalisation",
+            reference=args.engagement_ref or "",
+            prepared_for=args.prepared_for or "Data product council",
+            prepared_by=args.prepared_by or "Data product engagement team",
+            partner=args.partner or "", manager=args.manager or "")
+        paths = write_pack(result, args.pack, store=store, engagement=engagement,
+                           enrichment=result.programme)
+        print(f"\n  executive pack written to {Path(args.pack) / result.run_id} "
+              f"({len(paths)} files)")
     if args.json:
         write_json(args.json, {"summary": result.summary(),
                                "candidates": [c for c in result.ranked()],
@@ -631,6 +647,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", help="write the run result to this JSON file")
     p.add_argument("--workspace", default="data")
     p.add_argument("--force", action="store_true", help="run even if ingestion validation failed")
+    p.add_argument("--pack", help="write the executive pack, backlog workbook and dossiers here")
+    p.add_argument("--client", help="client name for the pack cover")
+    p.add_argument("--engagement", help="engagement name for the pack cover")
+    p.add_argument("--engagement-ref", dest="engagement_ref", help="engagement reference code")
+    p.add_argument("--prepared-for", dest="prepared_for", help="the committee the pack is tabled at")
+    p.add_argument("--prepared-by", dest="prepared_by")
+    p.add_argument("--partner", help="engagement partner named on the cover")
+    p.add_argument("--manager", help="engagement manager named on the cover")
     p.set_defaults(func=cmd_run)
 
     p = subparsers.add_parser("inspect", help="describe an extract file and its auto-mapping")

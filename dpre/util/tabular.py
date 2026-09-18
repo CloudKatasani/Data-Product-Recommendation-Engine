@@ -1,4 +1,10 @@
-"""Format-agnostic record loading: csv, tsv, json, jsonl, xlsx."""
+"""Format-agnostic record loading: csv, tsv, json, jsonl, xlsx.
+
+Loading is bounded and quiet about the filesystem (R-29, R-30). An error names
+the file, never the absolute path it was read from, because the message reaches
+an HTTP client; and a text extract is size-checked before it is read into
+memory, the way :mod:`dpre.util.xlsx` bounds a workbook.
+"""
 from __future__ import annotations
 
 import csv
@@ -13,27 +19,43 @@ from . import xlsx
 TRUE_VALUES = {"true", "t", "yes", "y", "1", "x"}
 FALSE_VALUES = {"false", "f", "no", "n", "0", ""}
 
+#: Ceiling for a delimited or JSON extract read whole into memory. A workbook
+#: has its own, richer bounds in :class:`dpre.util.xlsx.Limits`.
+MAX_TEXT_BYTES = 256 * 1024 * 1024
+
 
 class LoadError(ValueError):
     """Raised when a file cannot be parsed into records."""
 
 
-def load_records(path: str | Path, sheet: str | None = None) -> list[dict]:
+def _read_text(path: Path, encoding: str = "utf-8-sig") -> str:
+    size = path.stat().st_size
+    if size > MAX_TEXT_BYTES:
+        raise LoadError(f"{path.name} is {size} bytes, over the {MAX_TEXT_BYTES} byte limit")
+    try:
+        return path.read_text(encoding=encoding)
+    except UnicodeDecodeError as exc:
+        raise LoadError(f"{path.name} is not readable as text") from exc
+
+
+def load_records(path: str | Path, sheet: str | None = None,
+                 limits: "xlsx.Limits | None" = None) -> list[dict]:
     """Load one table of records from a file, guessing the format by suffix."""
     path = Path(path)
     if not path.exists():
-        raise LoadError(f"file not found: {path}")
+        raise LoadError(f"file not found: {path.name}")
     suffix = path.suffix.lower()
     if suffix in (".csv", ".txt"):
-        return load_delimited(path.read_text(encoding="utf-8-sig"), ",")
+        return load_delimited(_read_text(path), ",")
     if suffix in (".tsv", ".tab"):
-        return load_delimited(path.read_text(encoding="utf-8-sig"), "\t")
+        return load_delimited(_read_text(path), "\t")
     if suffix == ".jsonl" or suffix == ".ndjson":
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return [json.loads(line) for line in _read_text(path, "utf-8").splitlines()
+                if line.strip()]
     if suffix == ".json":
-        return _from_json(json.loads(path.read_text(encoding="utf-8")), sheet)
+        return _from_json(json.loads(_read_text(path, "utf-8")), sheet)
     if suffix in (".xlsx", ".xlsm"):
-        book = xlsx.read_workbook(path)
+        book = xlsx.read_workbook(path, limits)
         if sheet is not None:
             if sheet not in book:
                 raise LoadError(f"sheet '{sheet}' not in {path.name}; found {list(book)}")
@@ -60,9 +82,11 @@ def _from_json(payload: Any, key: str | None) -> list[dict]:
     raise LoadError("json payload contains no array of objects")
 
 
-def workbook_tabs(path: str | Path) -> dict[str, list[dict]]:
+def workbook_tabs(path: str | Path,
+                  limits: "xlsx.Limits | None" = None) -> dict[str, list[dict]]:
     """Read every sheet of a workbook as records (used by the synthetic pack)."""
-    return {name: xlsx.rows_to_records(rows) for name, rows in xlsx.read_workbook(path).items()}
+    return {name: xlsx.rows_to_records(rows)
+            for name, rows in xlsx.read_workbook(path, limits).items()}
 
 
 # --------------------------------------------------------------------------
