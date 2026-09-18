@@ -329,3 +329,77 @@ def test_conflicts_remain_readable_and_resolvable_through_the_api(server, run_id
 
     # And the heat map still ranks them by usage at stake.
     assert get(base, f"/api/runs/{run_id}/portfolio")["conflict_heat_map"]
+
+
+def test_the_browser_application_obeys_its_own_content_security_policy(server):
+    """The policy is default-src 'self' with no unsafe-inline, so a style
+    attribute in markup is refused by the browser and the layout collapses
+    silently. Nothing shipped may carry one."""
+    base, _ = server
+    for asset in ("/", "/app.js"):
+        with urllib.request.urlopen(f"{base}{asset}", timeout=30) as response:
+            body = response.read().decode()
+        assert 'style="' not in body, f"{asset} carries an inline style attribute"
+        assert "style: '" not in body, f"{asset} sets a style attribute through el()"
+        assert "style: \"" not in body, f"{asset} sets a style attribute through el()"
+    # Scripts and styles come from this origin only; there is no CDN to trust.
+    with urllib.request.urlopen(f"{base}/", timeout=30) as response:
+        page = response.read().decode()
+        policy = response.headers["Content-Security-Policy"]
+    assert "unsafe-inline" not in policy and "unsafe-eval" not in policy
+    assert "<script" not in page.replace('<script src="/app.js"></script>', "")
+
+
+def test_the_backlog_row_carries_what_a_board_sequences_on(server, run_id):
+    """A score alone cannot sequence a programme: size, money and wave ride
+    along on the row so the table needs no second request per candidate."""
+    base, _ = server
+    row = get(base, f"/api/v1/runs/{run_id}/candidates")["candidates"][0]
+    for field in ("size", "build_weeks", "annual_benefit", "wave", "rank_low", "rank_high",
+                  "consumer_confirmed", "lineage_id"):
+        assert field in row, field
+    assert row["lineage_id"].startswith("LIN-")
+
+
+def test_the_programme_and_governance_routes_answer(server, run_id):
+    base, _ = server
+    assert get(base, f"/api/v1/runs/{run_id}/waves")["waves"]
+    assert get(base, f"/api/v1/runs/{run_id}/raid")["raid"]
+    assert get(base, f"/api/v1/runs/{run_id}/value")["values"]
+    assert get(base, f"/api/v1/runs/{run_id}/effort")["efforts"]
+    assert get(base, f"/api/v1/runs/{run_id}/dependencies")["dependencies"]
+    assert get(base, f"/api/v1/runs/{run_id}/status")["measures"]
+    assert get(base, f"/api/v1/runs/{run_id}/sensitivity")["sensitivity"]
+    assert get(base, f"/api/v1/runs/{run_id}/benchmark")["benchmark"]
+    assert get(base, f"/api/v1/runs/{run_id}/delta")["run_id"] == run_id
+    assert get(base, "/api/v1/transitions")["transitions"]
+    assert get(base, "/api/v1/weights")["current"]["weight_version"]
+    # A fresh estate has no council approval on file, and the audit says so
+    # rather than reporting a clean bill.
+    audit = get(base, "/api/v1/audit")
+    assert audit["chain"]["ok"] is True
+    assert audit["ok"] is False and audit["findings"]
+
+
+def test_a_consumer_confirmation_clears_g1_and_is_keyed_by_lineage(server, run_id):
+    """Gate G1 has a half no machine can supply. The four facts a human writes
+    down are recorded against the lineage, so they survive the next run."""
+    base, _ = server
+    rows = get(base, f"/api/v1/runs/{run_id}/candidates?limit=500")["candidates"]
+    exploratory = [c for c in rows if c["status"] == "Exploratory"]
+    if not exploratory:
+        pytest.skip("this pack produced no Exploratory candidate")
+    candidate = exploratory[0]
+    assert candidate["consumer_confirmed"] is False
+    response = post(
+        base, f"/api/v1/runs/{run_id}/candidates/{candidate['candidate_id']}/confirm-consumer",
+        {"business_unit": "Retail Credit Risk",
+         "blocked_decision": "weekly provisioning sign-off",
+         "latency_tolerance": "next business day",
+         "consequence": "the provision is set on last week's exposures"},
+        identity="maria.chen")
+    assert response["confirmed_by"] == "maria.chen"
+    assert response["outcome"]["reason_code"] == "consumer_confirmed"
+    history = get(base, f"/api/v1/runs/{run_id}/candidates/"
+                        f"{candidate['candidate_id']}/history")
+    assert history["candidate_id"] == candidate["candidate_id"]

@@ -13,6 +13,7 @@ function el(tag, attrs = {}, ...children) {
     if (key === 'class') node.className = value;
     else if (key === 'html') node.innerHTML = value;
     else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value);
+    else if (key === 'style') Object.assign(node.style, value);
     else if (value === true) node.setAttribute(key, '');
     else node.setAttribute(key, value);
   }
@@ -69,7 +70,7 @@ function flash(message, kind = 'info', timeout = 6000) {
   const host = $('#flash');
   host.innerHTML = '';
   if (!message) return;
-  const banner = el('div', { class: `banner ${kind}`, style: 'margin-bottom:14px' }, message);
+  const banner = el('div', { class: `banner ${kind}`, class: 'mb-14' }, message);
   host.append(banner);
   if (timeout) setTimeout(() => { if (banner.isConnected) banner.remove(); }, timeout);
 }
@@ -353,7 +354,7 @@ function renderUploads() {
 }
 
 function renderTableBinding(file, tableInfo, fileIndex, tableIndex) {
-  const wrap = el('div', { class: 'stack', style: 'border-top:1px solid var(--border);padding-top:10px' });
+  const wrap = el('div', { class: 'stack ruled-top' });
   const select = el('select', {
     onchange: (event) => {
       tableInfo.binding = event.target.value;
@@ -499,7 +500,7 @@ function renderRunSummary(result) {
       chip(`weights ${summary.weight_version}`, ''),
       chip(summary.parser_version, ''))));
 
-  host.append(el('div', { class: 'tiles', style: 'margin:12px 0' },
+  host.append(el('div', { class: 'tiles my-12' },
     tile(fmt.num(stats.reports), 'reports ingested'),
     tile(fmt.num(stats.kpi_rows), 'KPI lineage rows'),
     tile(fmt.num(stats.canonicalization?.canonical_metrics), 'canonical metrics',
@@ -519,7 +520,7 @@ function renderRunSummary(result) {
   ], summary.quality_gates || []);
   host.append(gates);
 
-  host.append(el('h3', { style: 'margin-top:14px' }, 'Agent run'));
+  host.append(el('h3', { class: 'mt-14' }, 'Agent run'));
   const agents = el('div', { class: 'table-wrap' }, el('table'));
   fillTable($('table', agents), [
     { label: 'Agent', render: a => el('strong', {}, a.agent) },
@@ -529,7 +530,7 @@ function renderRunSummary(result) {
   host.append(agents);
 
   if ((summary.warnings || []).length) {
-    host.append(el('h3', { style: 'margin-top:14px' }, 'Warnings'));
+    host.append(el('h3', { class: 'mt-14' }, 'Warnings'));
     host.append(el('ul', { class: 'findings' }, summary.warnings.map(w => el('li', {}, w))));
   }
 }
@@ -590,11 +591,17 @@ function paintBacklog() {
   const proposed = rows.filter(r => r.status === 'Proposed').length;
   const retirable = rows.reduce((total, r) => total + r.reports_retirable, 0);
   const conflicts = rows.reduce((total, r) => total + r.conflicts, 0);
+  const benefit = rows.reduce((total, r) => total + (r.annual_benefit || 0), 0);
+  const currency = (rows.find(r => r.currency) || {}).currency || '';
   tiles.append(
     tile(fmt.num(rows.length), 'candidates shown'),
     tile(fmt.num(proposed), 'ready for review', 'status Proposed'),
     tile(fmt.num(retirable), 'reports fully covered'),
-    tile(fmt.num(conflicts), 'conflicts to adjudicate'));
+    tile(fmt.num(conflicts), 'conflicts to adjudicate'),
+    /* Summed from the candidates shown, so it moves with the filters. Each
+       candidate's figure is already attributed, so a report retired by two
+       candidates is not counted twice here either. */
+    tile(`${currency} ${fmt.num(benefit)}`, 'attributed annual benefit', 'illustrative'));
 
   fillTable($('#backlog-table'), [
     { label: 'Candidate', render: c => el('div', {},
@@ -611,7 +618,20 @@ function paintBacklog() {
     { label: 'Retires', num: true, render: c => fmt.num(c.reports_retirable) },
     { label: 'Users', num: true, render: c => fmt.num(c.users) },
     { label: 'Conflicts', num: true, render: c => fmt.num(c.conflicts) },
-    { label: 'Composite', num: true, render: c => el('strong', {}, fmt.num(c.composite, 1)) },
+    { label: 'Size', render: c => c.size || '-' },
+    { label: 'Wave', num: true, render: c => c.wave || '-' },
+    { label: 'Benefit', num: true, render: c => c.annual_benefit
+        ? el('div', {}, fmt.num(c.annual_benefit),
+            el('div', { class: 'small muted' },
+              c.payback_months ? `pays back in ${Math.round(c.payback_months)}m` : 'no payback'))
+        : '-' },
+    { label: 'Composite', num: true, render: c => el('div', {},
+        el('strong', {}, fmt.num(c.composite, 1)),
+        /* A rank that moves when the weights are nudged is a rank nobody
+           should sequence a programme on, so the spread sits under it. */
+        c.rank_low ? el('div', { class: 'small muted' },
+          c.rank_low === c.rank_high ? `rank ${c.rank_low}` : `rank ${c.rank_low}-${c.rank_high}`)
+          : null) },
   ], rows, { onRow: (row) => openDrawer(row.candidate_id), empty: 'No candidates match those filters.' });
 }
 
@@ -637,7 +657,7 @@ async function openDrawer(candidateId) {
     drawer.append(drawerHeader(data), drawerBody(data));
   } catch (error) {
     drawer.innerHTML = '';
-    drawer.append(el('div', { class: 'banner error', style: 'margin:20px' }, error.message));
+    drawer.append(el('div', { class: 'banner error m-20' }, error.message));
   }
 }
 
@@ -651,7 +671,7 @@ function drawerHeader(data) {
         candidate.name_status === 'AI_DRAFT' ? chip('AI_DRAFT', 'draft') : null),
       el('div', { class: 'small muted' }, `${candidate.candidate_id} · ${candidate.domain} · grain ${candidate.grain}`)),
     el('button', { class: 'ghost sm', onclick: () => $('#drawer-root').innerHTML = '' }, 'Close')));
-  header.append(el('p', { class: 'secondary small', style: 'margin-top:8px' }, candidate.purpose));
+  header.append(el('p', { class: 'secondary small mt-8' }, candidate.purpose));
   header.append(el('div', { class: 'row' },
     chip(data.status, statusClass(data.status)),
     chip(candidate.archetype), chip(candidate.tier), chip(candidate.origin),
@@ -659,7 +679,7 @@ function drawerHeader(data) {
 
   const tabs = el('div', { class: 'drawer-tabs' });
   const panels = {};
-  const names = ['Overview', 'Score', 'Metrics', 'Consumers', 'Reports',
+  const names = ['Overview', 'Score', 'Delivery', 'Metrics', 'Consumers', 'Reports',
                  'Attributes', 'Sources', 'Critique', 'Decisions', 'Seeds', 'Review'];
   names.forEach((name, index) => {
     const button = el('button', { 'aria-current': index === 0 ? 'true' : 'false',
@@ -720,6 +740,8 @@ function drawerBody(data) {
       { label: 'Detail', render: e => el('span', { class: 'small secondary' }, e.detail) },
     ], data.evidence || []));
 
+  panels.Delivery = deliveryPanel(data);
+
   panels.Metrics = tableCard([
     { label: 'Canonical name', render: m => el('div', {}, el('strong', {}, m.canonical_name),
         m.name_status === 'AI_DRAFT' ? chip('AI_DRAFT', 'draft') : chip('accepted', 'good')) },
@@ -777,7 +799,7 @@ function drawerBody(data) {
   panels.Critique = el('div', { class: 'stack' },
     el('p', { class: 'secondary small' }, 'What a reviewer is likely to raise, checked against the hard gates and the Stage 1 and Stage 2 exit criteria.'),
     el('div', { class: 'stack' }, (candidate.critique || []).map(finding =>
-      el('div', { class: 'row', style: 'align-items:flex-start' },
+      el('div', { class: 'row align-start' },
         chip(finding.severity, severityClass(finding.severity)),
         el('div', {}, el('strong', { class: 'small' }, finding.criterion),
           el('div', { class: 'small secondary' }, finding.finding))))));
@@ -792,7 +814,7 @@ function drawerBody(data) {
         el('dt', {}, 'Inferred decision'), el('dd', {}, draft.inferred_decision),
         el('dt', {}, 'Latency tolerance'), el('dd', { class: 'muted' }, draft.latency_tolerance),
         el('dt', {}, 'Consequence'), el('dd', { class: 'muted' }, draft.consequence)),
-      el('div', { class: 'small muted', style: 'margin-top:6px' }, 'Questions asked today:'),
+      el('div', { class: 'small muted mt-6' }, 'Questions asked today:'),
       el('ul', { class: 'findings' }, (draft.questions || []).map(q => el('li', {}, q))))));
 
   panels.Seeds = el('div', { class: 'stack' },
@@ -827,7 +849,7 @@ function meter(label, value, isRisk) {
   const pct = Math.max(0, Math.min(100, value));
   return el('div', { class: 'meter' },
     el('span', { class: 'secondary' }, label),
-    el('span', { class: 'track' }, el('span', { class: `fill${isRisk ? ' risk' : ''}`, style: `width:${pct}%` })),
+    el('span', { class: 'track' }, el('span', { class: `fill${isRisk ? ' risk' : ''}`, style: { width: `${pct}%` } })),
     el('span', { class: 'val' }, fmt.num(value, 0)));
 }
 
@@ -835,6 +857,121 @@ function tableCard(columns, rows) {
   const node = el('table');
   fillTable(node, columns, rows);
   return el('div', { class: 'table-wrap' }, node);
+}
+
+function deliveryPanel(data) {
+  /* What it costs, what it is worth, when it ships and what it waits on. A
+     board cannot sequence a backlog from a score alone, and every figure here
+     names the assumption version it came from so nobody mistakes an
+     illustrative rate for a client number. */
+  const candidate = data.candidate;
+  const effort = candidate.effort || {};
+  const value = candidate.value || {};
+  const spread = candidate.rank_range || {};
+  const currency = value.currency || '';
+
+  const drivers = effort.drivers || [];
+  const components = value.components || [];
+
+  return el('div', { class: 'stack' },
+    el('div', { class: 'tiles' },
+      tile(effort.size || '-', 'build size',
+        effort.total_weeks ? `${fmt.num(effort.total_weeks, 1)} weeks` : ''),
+      tile(`${currency} ${fmt.num(value.attributed_annual_benefit)}`, 'annual benefit',
+        value.assumption_version ? `assumptions ${value.assumption_version}` : ''),
+      tile(`${currency} ${fmt.num(value.build_cost)}`, 'cost to build',
+        value.payback_months ? `pays back in ${Math.round(value.payback_months)} months`
+          : 'no payback inside the horizon'),
+      tile(candidate.wave ? `Wave ${candidate.wave}` : 'unscheduled', 'delivery wave',
+        spread.rank_low ? `rank ${spread.rank_low}-${spread.rank_high} under perturbation` : '')),
+
+    value.gross_annual_benefit && value.gross_annual_benefit !== value.attributed_annual_benefit
+      ? el('p', { class: 'secondary small' },
+          `This candidate's own claim is ${currency} ${fmt.num(value.gross_annual_benefit)}. ` +
+          `The figure above is what remains after the same report or conflict is ` +
+          `attributed once across the estate.`)
+      : null,
+
+    components.length ? el('h3', {}, 'Where the benefit comes from') : null,
+    components.length ? tableCard([
+      { label: 'Component', render: c => c.name },
+      { label: 'Driver', num: true, render: c => fmt.num(c.driver_count) },
+      { label: 'Rate', num: true, render: c => fmt.num(c.rate) },
+      { label: 'Annual', num: true, render: c => fmt.num(c.annual) },
+      { label: 'Basis', render: c => el('span', { class: 'small secondary' }, c.detail || c.basis) },
+    ], components) : null,
+
+    drivers.length ? el('h3', {}, 'What makes it this size') : null,
+    drivers.length ? tableCard([
+      { label: 'Driver', render: d => d.name },
+      { label: 'Value', num: true, render: d => fmt.num(d.value, 2) },
+      { label: 'Rate', num: true, render: d => fmt.num(d.rate, 2) },
+      { label: 'Points', num: true, render: d => fmt.num(d.points, 1) },
+      { label: 'Detail', render: d => el('span', { class: 'small secondary' }, d.detail) },
+    ], drivers) : null,
+
+    (!drivers.length && !components.length)
+      ? el('p', { class: 'secondary' },
+          'This run was made before the programme layer existed. Re-run the engine to price it.')
+      : null);
+}
+
+/* Gate G1 has two halves and only one of them is computable. The engine can
+   see that two business units read these metrics; it cannot see which decision
+   the data blocks, how fresh it has to be, or what happens without it. Until a
+   human writes those down the candidate stays Exploratory, so the form that
+   collects them belongs where the reviewer already is. */
+function consumerConfirmation(data) {
+  const candidate = data.candidate;
+  const gates = (candidate.score || {}).gates || [];
+  const g1 = gates.find(g => g.gate === 'G1');
+  if (candidate.consumer_confirmed) {
+    return el('div', { class: 'banner ok' },
+      'A named consumer is on file for this product. It carries forward to the next run.');
+  }
+  if (data.status !== 'Exploratory' && (!g1 || g1.passed)) return null;
+
+  const unit = el('input', { placeholder: 'e.g. Retail Credit Risk' });
+  const decision = el('input', { placeholder: 'the decision this data blocks' });
+  const latency = el('input', { placeholder: 'how fresh it has to be, in their words' });
+  const consequence = el('input', { placeholder: 'what happens if it does not arrive' });
+  const result = el('div', {});
+
+  async function confirm() {
+    if (!requireIdentity('confirm a consumer')) return;
+    try {
+      const response = await api(
+        `/api/v1/runs/${state.runId}/candidates/${candidate.candidate_id}/confirm-consumer`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            business_unit: unit.value.trim(), blocked_decision: decision.value.trim(),
+            latency_tolerance: latency.value.trim(), consequence: consequence.value.trim(),
+          }),
+        });
+      result.innerHTML = '';
+      result.append(el('div', { class: 'banner ok' },
+        `Recorded by ${response.confirmed_by}. The candidate can now be Accepted, and the ` +
+        'confirmation carries into the next run on its lineage id.'));
+      state.candidates = [];
+    } catch (error) {
+      result.innerHTML = '';
+      result.append(el('div', { class: 'banner error' }, error.message));
+    }
+  }
+
+  return el('details', { class: 'card', open: data.status === 'Exploratory' },
+    el('summary', {}, 'Confirm the named consumer (gate G1)'),
+    el('p', { class: 'secondary small' },
+      g1 ? g1.detail : 'This candidate has no consumer confirmation on file.'),
+    el('div', { class: 'row' },
+      el('label', { class: 'field' }, 'Business unit', unit),
+      el('label', { class: 'field' }, 'Decision it blocks', decision)),
+    el('div', { class: 'row' },
+      el('label', { class: 'field' }, 'Latency tolerance', latency),
+      el('label', { class: 'field' }, 'Consequence if absent', consequence)),
+    el('div', { class: 'row' },
+      el('button', { class: 'primary', onclick: confirm }, 'Record confirmation')),
+    result);
 }
 
 function reviewPanel(data) {
@@ -901,6 +1038,7 @@ function reviewPanel(data) {
       'The engine proposes; humans decide. No engine path can move a candidate past ' +
       'Proposed, and the decision is attributed to the principal the server authenticated, ' +
       'not to a name typed into this form.'),
+    consumerConfirmation(data),
     el('div', { class: 'row' },
       el('label', { class: 'field' }, 'Decision', decisionSelect),
       el('label', { class: 'field' }, 'Reason code', reason),
@@ -963,7 +1101,7 @@ async function renderPortfolio() {
         .sort((a, b) => b[1] - a[1])
         .map(([key, count]) => el('div', { class: 'meter' },
           el('span', { class: 'secondary', title: key }, key),
-          el('span', { class: 'track' }, el('span', { class: 'fill', style: `width:${(count / total) * 100}%` })),
+          el('span', { class: 'track' }, el('span', { class: 'fill', style: { width: `${(count / total) * 100}%` } })),
           el('span', { class: 'val' }, count))))));
   });
 
@@ -1147,7 +1285,7 @@ async function askQuestion(question) {
           el('span', { class: 'chip', title: citation.label || '' },
             `${citation.type}: ${citation.id}`))));
     }
-    bubble.append(el('div', { class: 'small muted', style: 'margin-top:6px' },
+    bubble.append(el('div', { class: 'small muted mt-6' },
       `query ${answer.query_used || answer.intent} · ${answer.bound_to}`));
     if ((answer.rows || []).length) {
       bubble.append(el('details', { class: 'raw' },
@@ -1155,7 +1293,7 @@ async function askQuestion(question) {
         el('pre', {}, JSON.stringify(answer.rows.slice(0, 25), null, 2))));
     }
     if ((answer.followups || []).length) {
-      bubble.append(el('div', { class: 'suggestions', style: 'margin-top:8px' },
+      bubble.append(el('div', { class: 'suggestions mt-8' },
         answer.followups.map(f => el('button', { class: 'ghost sm', onclick: () => askQuestion(f) }, f))));
     }
     log.append(bubble);
@@ -1168,7 +1306,8 @@ async function askQuestion(question) {
 
 /* ------------------------------------------------------------------- runs */
 async function renderRuns() {
-  const data = await api('/api/runs');
+  const data = await api('/api/v1/runs');
+  await renderGovernance();
   fillTable($('#runs-table'), [
     { label: 'Run', render: r => el('div', {}, el('strong', {}, r.run_id),
         el('div', { class: 'small muted' }, `${r.mode} · ${r.industry || 'manual'} · ${r.catalog}`)) },
@@ -1182,6 +1321,49 @@ async function renderRuns() {
   ], data.runs || [], { onRow: (row) => selectRun(row.run_id) });
 
   if (state.runId) await renderFeedback();
+}
+
+/* The audit verdict and what moved since the last run. Both belong on the Runs
+   tab because that is where somebody goes to ask whether this run can be
+   trusted and what changed under it. */
+async function renderGovernance() {
+  const host = $('#runs-governance');
+  if (!host) return;
+  host.innerHTML = '';
+  let audit = null;
+  let delta = null;
+  try {
+    audit = await api('/api/v1/audit');
+    if (state.runId) delta = await api(`/api/v1/runs/${state.runId}/delta`);
+  } catch (error) {
+    host.append(el('div', { class: 'banner error' }, error.message));
+    return;
+  }
+  const chain = audit.chain || {};
+  const weights = audit.weights_in_force || {};
+  host.append(el('div', { class: 'tiles' },
+    tile(chain.ok ? 'intact' : 'BROKEN', 'decision chain',
+      `${fmt.num(chain.rows)} decision rows rehashed`),
+    tile(fmt.num((audit.open_waivers || []).length), 'gate waivers in force',
+      'accepted with an exception'),
+    tile(weights.approved_by ? 'approved' : 'pending', 'weights in force',
+      `${weights.weight_version || ''}${weights.approved_by ? ' · ' + weights.approved_by : ''}`),
+    tile(fmt.num((delta && delta.rows || []).length), 'candidates changed',
+      delta && delta.previous_run_id ? `against ${delta.previous_run_id}` : 'first run')));
+
+  if ((audit.findings || []).length) {
+    host.append(el('h3', {}, 'What an auditor would ask about'));
+    host.append(el('ul', { class: 'findings' }, audit.findings.map(f => el('li', {}, f))));
+  }
+  if (delta && (delta.rows || []).length) {
+    host.append(el('h3', {}, 'Since the previous run'));
+    host.append(tableCard([
+      { label: 'Candidate', render: r => r.proposed_name || r.candidate_id },
+      { label: 'Change', render: r => chip(r.change || r.delta_type || '-') },
+      { label: 'Detail', render: r => el('span', { class: 'small secondary' },
+          r.detail || r.note || '') },
+    ], delta.rows.slice(0, 40)));
+  }
 }
 
 async function selectRun(runId) {
@@ -1199,7 +1381,7 @@ async function selectRun(runId) {
     chip(data.run.mode), chip(data.run.industry || 'manual'), chip(data.run.catalog),
     chip(data.run.generation_id || 'no generation id'),
     chip(data.run.synthetic ? 'synthetic' : 'real extract', data.run.synthetic ? 'warning' : 'good')));
-  host.append(el('details', { class: 'raw', style: 'margin-top:10px' },
+  host.append(el('details', { class: 'raw mt-10' },
     el('summary', {}, 'Run statistics, gates and agent log'),
     el('pre', {}, JSON.stringify({ stats: data.run.stats, quality_gates: data.run.quality_gates,
       agents: data.run.agent_log, warnings: data.run.warnings }, null, 2))));
@@ -1217,7 +1399,7 @@ async function renderFeedback() {
       'Reviewer decisions are the training signal. Weight changes never re-score accepted candidates; they apply to the next run.'));
     host.append(el('div', { class: 'banner info' }, data.weights.note || ''));
     if (data.weights.sample_size) {
-      host.append(el('div', { class: 'tiles', style: 'margin:10px 0' },
+      host.append(el('div', { class: 'tiles my-10' },
         tile(fmt.num(data.weights.sample_size), 'decisions in sample'),
         tile(fmt.num(data.weights.accepted), 'accepted'),
         tile(fmt.num(data.weights.rejected), 'rejected'),
@@ -1240,7 +1422,7 @@ async function renderFeedback() {
       { label: 'Rationale', render: r => el('span', { class: 'small secondary' }, r.rationale) },
     ], data.clustering_resolution || []));
     const approver = el('input', { placeholder: 'council member name' });
-    host.append(el('div', { class: 'row', style: 'margin-top:12px' },
+    host.append(el('div', { class: 'row mt-12' },
       el('label', { class: 'field' }, 'Approve proposed weights as', approver),
       el('button', {
         onclick: async () => {

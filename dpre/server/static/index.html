@@ -75,7 +75,7 @@
         volumes and defect rates are identical across industries; only the source systems,
         domains, entity names, KPI names and glossary terms change.</p>
       <div class="industry-grid" id="industry-grid"></div>
-      <div class="row" style="margin-top:14px">
+      <div class="row" class="mt-14">
         <label class="field">Catalog
           <select id="auto-catalog">
             <option value="collibra">Collibra</option>
@@ -88,7 +88,7 @@
         <button class="ghost" id="btn-download-pack">Download workbook</button>
         <button class="primary" id="btn-run-automated">Generate and run</button>
       </div>
-      <div id="automated-status" class="small muted" style="margin-top:10px"></div>
+      <div id="automated-status" class="small muted" class="mt-10"></div>
     </div>
 
     <!-- Manual panel -->
@@ -106,8 +106,8 @@
           is bound separately.</p>
         <input type="file" id="file-input" multiple hidden>
       </div>
-      <div id="manual-files" class="stack" style="margin-top:14px"></div>
-      <div class="row" style="margin-top:14px">
+      <div id="manual-files" class="stack" class="mt-14"></div>
+      <div class="row" class="mt-14">
         <label class="field">Catalog
           <select id="manual-catalog">
             <option value="">use whichever was supplied</option>
@@ -119,7 +119,7 @@
         <div class="spacer"></div>
         <button class="primary" id="btn-run-manual" disabled>Run the engine</button>
       </div>
-      <div id="manual-status" class="small muted" style="margin-top:10px"></div>
+      <div id="manual-status" class="small muted" class="mt-10"></div>
     </div>
 
     <div class="card" id="run-summary" hidden></div>
@@ -138,7 +138,7 @@
           <label class="field">Search <input id="filter-text" placeholder="name or id" size="16"></label>
         </div>
       </div>
-      <div id="backlog-tiles" class="tiles" style="margin-top:12px"></div>
+      <div id="backlog-tiles" class="tiles" class="mt-12"></div>
     </div>
     <div class="card pad-0">
       <div class="table-wrap"><table id="backlog-table"></table></div>
@@ -160,12 +160,12 @@
       </div>
     </div>
     <div class="card pad-0">
-      <div style="padding:14px 18px 0"><h2>Retirement map</h2>
+      <div class="card-head"><h2>Retirement map</h2>
         <p class="secondary small">Reports by candidate by disposition, with the users affected.</p></div>
       <div class="table-wrap"><table id="retirement-table"></table></div>
     </div>
     <div class="card pad-0">
-      <div style="padding:14px 18px 0"><h2>Conflict heat map</h2>
+      <div class="card-head"><h2>Conflict heat map</h2>
         <p class="secondary small">Canonical metrics by number of competing definitions and the
           usage at stake behind them.</p></div>
       <div class="table-wrap"><table id="heat-table"></table></div>
@@ -182,16 +182,16 @@
     </div>
     <div class="grid two">
       <div class="card pad-0">
-        <div style="padding:14px 18px 0"><h3>Unresolved lineage rows</h3></div>
+        <div class="card-head"><h3>Unresolved lineage rows</h3></div>
         <div class="table-wrap"><table id="gap-quarantine"></table></div>
       </div>
       <div class="card pad-0">
-        <div style="padding:14px 18px 0"><h3>Metrics without a steward</h3></div>
+        <div class="card-head"><h3>Metrics without a steward</h3></div>
         <div class="table-wrap"><table id="gap-stewards"></table></div>
       </div>
     </div>
     <div class="card pad-0">
-      <div style="padding:14px 18px 0"><h3>Columns with no business term</h3></div>
+      <div class="card-head"><h3>Columns with no business term</h3></div>
       <div class="table-wrap"><table id="gap-columns"></table></div>
     </div>
   </section>
@@ -205,8 +205,8 @@
         candidate and evidence IDs behind it.</p>
       <div class="suggestions" id="chat-suggestions"></div>
       <div class="chat-log" id="chat-log"></div>
-      <form class="row" id="chat-form" style="margin-top:12px">
-        <input id="chat-input" placeholder="Which candidates retire the most Finance reports?" style="flex:1">
+      <form class="row" id="chat-form" class="mt-12">
+        <input id="chat-input" placeholder="Which candidates retire the most Finance reports?" class="grow">
         <button class="primary" type="submit">Ask</button>
       </form>
     </div>
@@ -214,8 +214,15 @@
 
   <!-- ---------------- Runs ---------------- -->
   <section class="view" id="view-runs" hidden>
+    <div class="card">
+      <h2>Can this run be trusted</h2>
+      <p class="secondary small">The decision chain is rehashed on every read, so an altered
+        row is visible rather than merely unlikely. Exceptions and an unapproved weight
+        vector are shown here because they are what an audit function asks about first.</p>
+      <div id="runs-governance"></div>
+    </div>
     <div class="card pad-0">
-      <div style="padding:14px 18px 0"><h2>Runs</h2>
+      <div class="card-head"><h2>Runs</h2>
         <p class="secondary small">Every run stores its extract IDs, weight version and parser
           version, so it can be reproduced exactly.</p></div>
       <div class="table-wrap"><table id="runs-table"></table></div>

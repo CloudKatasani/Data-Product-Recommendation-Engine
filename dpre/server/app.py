@@ -833,6 +833,128 @@ def build_router(workspace: Workspace) -> Router:
         return mark_decision_critical(store, match.group("run_id"), body.get("report_id", ""),
                                       req["principal"].identity, body.get("note", ""))
 
+    # ---- programme and governance --------------------------------------
+    #
+    # The review session decides one candidate at a time. Everything below
+    # answers the questions asked between sessions - what does this cost, what
+    # ships when, what is on the risk log, can the chain be trusted - from the
+    # governed tables, without composing SQL at the surface.
+
+    def run_value(_req, match, _body):
+        from ..value.model import load_values
+        run_id = match.group("run_id")
+        rows = load_values(store.connection, run_id)
+        assumptions = store.query(
+            "SELECT * FROM VALUE_ASSUMPTION ORDER BY effective_from DESC LIMIT 1")
+        return {"run_id": run_id, "values": rows,
+                "assumptions": assumptions[0] if assumptions else {}}
+
+    def run_effort(_req, match, _body):
+        from ..programme.effort import load_efforts
+        run_id = match.group("run_id")
+        return {"run_id": run_id, "efforts": load_efforts(store.connection, run_id)}
+
+    def run_waves(_req, match, _body):
+        from ..programme.waves import load_waves
+        run_id = match.group("run_id")
+        plan = load_waves(store.connection, run_id)
+        names = {row["candidate_id"]: row["proposed_name"] for row in store.candidates(run_id)}
+        for bucket in ("waves", "unscheduled"):
+            for row in plan[bucket]:
+                row["proposed_name"] = names.get(row["candidate_id"], row["candidate_id"])
+        return {"run_id": run_id, **plan}
+
+    def run_dependencies(req, match, _body):
+        from ..programme.dependencies import load_dependencies
+        run_id = match.group("run_id")
+        candidate_id = (req["query"].get("candidate_id") or [None])[0]
+        return {"run_id": run_id,
+                "dependencies": load_dependencies(store.connection, run_id, candidate_id)}
+
+    def run_raid(req, match, _body):
+        from ..programme.raid import load_raid
+        run_id = match.group("run_id")
+        raid_type = (req["query"].get("type") or [None])[0]
+        window, page = paginate(req, load_raid(store.connection, run_id, raid_type))
+        return {"run_id": run_id, "raid": window, "page": page}
+
+    def run_status(req, match, _body):
+        from ..programme.status import status_report
+        run_id = match.group("run_id")
+        previous = (req["query"].get("previous_run_id") or [None])[0] \
+            or store.previous_run_id(run_id)
+        return status_report(store, run_id, previous)
+
+    def run_sensitivity(_req, match, _body):
+        from ..score.sensitivity import load_sensitivity
+        run_id = match.group("run_id")
+        return {"run_id": run_id, "sensitivity": load_sensitivity(store.connection, run_id)}
+
+    def run_benchmark(_req, match, _body):
+        from ..portfolio.benchmark import load_benchmark
+        run_id = match.group("run_id")
+        return {"run_id": run_id, "benchmark": load_benchmark(store.connection, run_id)}
+
+    def run_delta(_req, match, _body):
+        run_id = match.group("run_id")
+        return {"run_id": run_id, "previous_run_id": store.previous_run_id(run_id),
+                "rows": store.run_delta(run_id)}
+
+    def candidate_history(_req, match, _body):
+        run_id, candidate_id = match.group("run_id"), match.group("candidate_id")
+        return {"run_id": run_id, "candidate_id": candidate_id,
+                "status": store.status_history(run_id, candidate_id),
+                "payload": store.payload_history(run_id, candidate_id)}
+
+    def confirm_consumer_route(req, match, body):
+        """The human half of gate G1 (specification section 9.2).
+
+        Four facts a machine cannot supply: which business unit, which decision
+        the data blocks, how fresh it has to be, and what happens without it.
+        The record is keyed by lineage, so it survives into the next run.
+        """
+        from ..review.workflow import confirm_consumer
+        principal: Principal = req["principal"]
+        run_id, candidate_id = match.group("run_id"), match.group("candidate_id")
+        row = store.candidate(run_id, candidate_id)
+        if row is None:
+            raise problem("DPRE-INPUT-002",
+                          f"Candidate {candidate_id} is not in run {run_id}.")
+        authorize(principal, "review", row.get("domain") or "")
+        outcome = confirm_consumer(
+            store, run_id, candidate_id, body.get("business_unit", ""),
+            body.get("blocked_decision", ""), body.get("latency_tolerance", ""),
+            body.get("consequence", ""), principal.identity, note=body.get("note", ""))
+        return {"outcome": outcome.to_dict(), "confirmed_by": principal.identity}
+
+    def exceptions(req, _match, _body):
+        run_id = (req["query"].get("run") or [None])[0]
+        return {"waivers": store.open_waivers(run_id)}
+
+    def audit(req, _match, _body):
+        from ..governance import audit_report
+        return audit_report(store, (req["query"].get("run") or [None])[0])
+
+    def transitions(_req, _match, _body):
+        from ..governance import transitions_table
+        return {"transitions": transitions_table()}
+
+    def weights_view(_req, _match, _body):
+        return {"current": store.current_weights().to_dict(),
+                "versions": store.weight_versions()}
+
+    def benefits(_req, _match, _body):
+        from ..governance import realisation_view
+        return {"realisation": realisation_view(store)}
+
+    def benefit_event(req, _match, body):
+        from ..governance import record_benefit_event
+        principal: Principal = req["principal"]
+        return record_benefit_event(
+            store, body.get("lineage_id", ""), body.get("event_type", ""),
+            body.get("subject_id", ""), body.get("occurred_at", ""),
+            principal.identity, note=body.get("note", ""))
+
     def feedback(_req, _match, _body):
         return feedback_report(store, ws.config.weights)
 
@@ -944,6 +1066,42 @@ def build_router(workspace: Workspace) -> Router:
     add("POST", "/api/v1/weights/approve", approve, action="approve_weights", tag="review",
         summary="Council approval of a proposed weight version")
 
+    add("GET", "/api/v1/runs/{run_id}/value", run_value, action="read", tag="programme",
+        summary="Money behind each candidate, with the assumption version")
+    add("GET", "/api/v1/runs/{run_id}/effort", run_effort, action="read", tag="programme",
+        summary="Build effort and t-shirt size per candidate, with its drivers")
+    add("GET", "/api/v1/runs/{run_id}/waves", run_waves, action="read", tag="programme",
+        summary="The delivery sequence and what could not be scheduled")
+    add("GET", "/api/v1/runs/{run_id}/dependencies", run_dependencies, action="read",
+        tag="programme", summary="What each candidate waits on")
+    add("GET", "/api/v1/runs/{run_id}/raid", run_raid, action="read", tag="programme",
+        paginated=True, summary="Risks, assumptions, issues and dependencies")
+    add("GET", "/api/v1/runs/{run_id}/status", run_status, action="read", tag="programme",
+        summary="Status against the section 14.2 success measures")
+    add("GET", "/api/v1/runs/{run_id}/sensitivity", run_sensitivity, action="read",
+        tag="programme", summary="How far each rank moves under a weight perturbation")
+    add("GET", "/api/v1/runs/{run_id}/benchmark", run_benchmark, action="read",
+        tag="programme", summary="This estate against the reference bands")
+    add("GET", "/api/v1/runs/{run_id}/delta", run_delta, action="read", tag="runs",
+        summary="What changed since the previous run")
+    add("GET", "/api/v1/runs/{run_id}/candidates/{candidate_id}/history", candidate_history,
+        action="read", tag="review", summary="Every status and payload change, with its cause")
+    add("POST", "/api/v1/runs/{run_id}/candidates/{candidate_id}/confirm-consumer",
+        confirm_consumer_route, action="review", tag="review",
+        summary="Record the named consumer that clears gate G1")
+    add("GET", "/api/v1/exceptions", exceptions, action="read", tag="governance",
+        summary="Gate waivers still in force")
+    add("GET", "/api/v1/audit", audit, action="read", tag="governance",
+        summary="Hash-chain verification and the exceptions an auditor would ask about")
+    add("GET", "/api/v1/transitions", transitions, action="read", tag="governance",
+        summary="The candidate status state machine")
+    add("GET", "/api/v1/weights", weights_view, action="read", tag="governance",
+        summary="The weight vector in force and every stored version")
+    add("GET", "/api/v1/benefits", benefits, action="read", tag="governance",
+        summary="Planned against realised benefit for every accepted lineage")
+    add("POST", "/api/v1/benefits/events", benefit_event, action="review", tag="governance",
+        summary="Record a realisation event against an accepted lineage")
+
     add("POST", "/api/v1/chat", chat, action="read", tag="chat",
         summary="Ask the conversational surface a named-query question")
 
@@ -1022,6 +1180,18 @@ def _row_summary(row: dict) -> dict:
         "risk": score.get("risk", 0.0),
         "gates": score.get("gates", []),
         "critique": payload.get("critique", []),
+        # Programme figures, written by the Programme step. A backlog that shows
+        # only a score asks a board to sequence work it cannot price.
+        "size": (payload.get("effort") or {}).get("size", ""),
+        "build_weeks": (payload.get("effort") or {}).get("total_weeks", 0.0),
+        "annual_benefit": (payload.get("value") or {}).get("attributed_annual_benefit", 0.0),
+        "payback_months": (payload.get("value") or {}).get("payback_months"),
+        "currency": (payload.get("value") or {}).get("currency", ""),
+        "wave": payload.get("wave"),
+        "rank_low": (payload.get("rank_range") or {}).get("rank_low"),
+        "rank_high": (payload.get("rank_range") or {}).get("rank_high"),
+        "consumer_confirmed": bool(payload.get("consumer_confirmed", False)),
+        "lineage_id": payload.get("lineage_id", ""),
     }
 
 

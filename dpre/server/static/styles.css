@@ -299,3 +299,23 @@ ul.findings li { margin-bottom: 5px; }
   padding: 4px 10px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--surface-2);
 }
+
+/* Spacing utilities.
+   The Content-Security-Policy is default-src 'self' with no unsafe-inline, so
+   a style="..." attribute in markup is refused by the browser and the layout
+   silently collapses. Anything that would have been an inline style is a class
+   here; the two genuinely dynamic widths are written through the CSSOM, which
+   the policy allows. */
+.mt-6 { margin-top: 6px; }
+.mt-8 { margin-top: 8px; }
+.mt-10 { margin-top: 10px; }
+.mt-12 { margin-top: 12px; }
+.mt-14 { margin-top: 14px; }
+.mb-14 { margin-bottom: 14px; }
+.my-10 { margin: 10px 0; }
+.my-12 { margin: 12px 0; }
+.m-20 { margin: 20px; }
+.grow { flex: 1; }
+.align-start { align-items: flex-start; }
+.card-head { padding: 14px 18px 0; }
+.ruled-top { border-top: 1px solid var(--border); padding-top: 10px; }
