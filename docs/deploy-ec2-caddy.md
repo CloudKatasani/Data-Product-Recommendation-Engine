@@ -158,7 +158,7 @@ $DOMAIN {
 		max_size 64MB
 	}
 
-	basic_auth {
+	basicauth {
 		$USERNAME $HASH
 	}
 
@@ -225,7 +225,7 @@ rejected what.
    starting with `$2a$`; select it and copy it).
 2. Open the config: `sudo nano /etc/caddy/Caddyfile`
 3. In the `$DOMAIN { ... }` block:
-   - under `basic_auth {`, add a line: `newuser <pasted hash>`
+   - under `basicauth {`, add a line: `newuser <pasted hash>`
    - under `map ... {dpre_roles} {`, add a line: `newuser "reviewer"`
 4. Save with **Ctrl+O**, **Enter**, then exit with **Ctrl+X**.
 5. Run step 5.5 again (validate, then reload).
@@ -288,6 +288,7 @@ every 24 hours, keep 14.
 | `Command 'python' not found` | Use `python3`. |
 | `No module named dpre` | You are not in the code folder. Run `cd ~/Data-Product-Recommendation-Engine` first. |
 | `systemctl status dpre` is not running | `sudo journalctl -u dpre -n 50 --no-pager` shows why. A `refusing to bind` line means `/etc/systemd/system/dpre.service` was edited; repeat step 4. |
+| `caddy validate` says `unrecognized directive: basic_auth` | Your Caddy is older than 2.8 and spells it `basicauth`. Fix it with `sudo sed -i 's/\bbasic_auth\b/basicauth/' /etc/caddy/Caddyfile`, then validate again. (Newer Caddy accepts `basicauth` too, with a deprecation warning you can ignore.) |
 | `caddy validate` fails | Usually the domain line is empty because `DOMAIN`/`USERNAME`/`HASH` were not set in this terminal tab. Restore the backup: `sudo cp /etc/caddy/Caddyfile.backup-<date> /etc/caddy/Caddyfile`, then repeat step 5 from 5.3 after running the `DOMAIN=...` line again. |
 | Browser: *This site can't be reached* | DNS not pointing at the server yet (`getent hosts yourdomain`). |
 | Certificate warning, or Caddy log shows `challenge failed` | DNS points somewhere else, or Cloudflare proxy (orange cloud) is on. Fix, then `sudo systemctl reload caddy`. |
