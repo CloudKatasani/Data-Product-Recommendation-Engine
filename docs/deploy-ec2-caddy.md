@@ -1,310 +1,283 @@
 # Deploying on AWS EC2 behind Caddy (step by step)
 
-This guide assumes you work in the **AWS web console** and connect to the
-server with **EC2 Instance Connect** (the *Connect* button, which opens a
-terminal in your browser). No AWS command line or SSH key on your laptop is
-needed. Expect about 45 minutes the first time.
+This guide adds the engine to an **EC2 server that already runs Caddy** for
+another app, the same way that app was deployed:
 
-What you end up with: one EC2 server running two containers.
+- the code is cloned from GitHub with a plain HTTPS link (the repository is
+  public, so no key is needed);
+- the app runs as a background service listening only on `127.0.0.1`;
+- Caddy gets the HTTPS certificate and forwards a new domain name to it.
+
+You do everything in the **browser terminal** (EC2 console → your instance →
+**Connect** → **EC2 Instance Connect** → **Connect**). Expect about 20
+minutes.
 
 ```
-your browser ──HTTPS──▶ Caddy (certificate, username/password sign-in)
-                            │  private Docker network, never exposed
-                            ▼
-                        the engine (port 8000, reachable only from Caddy)
-                            │
-                        disk volume "dpre-data" (database and uploads)
+your browser ──HTTPS──▶ Caddy (already on the server)
+                          ├── your-other-app.example.com → 127.0.0.1:3000
+                          └── dpre.example.com           → 127.0.0.1:8000  (this app)
 ```
 
-- **Caddy** gets a free HTTPS certificate from Let's Encrypt, asks every visitor
-  for a username and password, and tells the engine who signed in and which
-  roles they have.
-- **The engine** has no public port. It refuses to start on a public address
-  without something like Caddy in front of it, and it only trusts identity
-  information that comes from Caddy.
+**One thing that differs from the other app:** this engine won't let anyone
+in without knowing who they are, so Caddy also asks for a **username and
+password** and passes the signed-in name and roles to the app. Step 5 sets
+that up.
 
-The files used are in `deploy/ec2-caddy/` in this repository:
-`compose.yml` (the two containers), `setup.sh` (asks questions and writes the
-config for you), and `Caddyfile.example` (what the config looks like, for
-reference).
-
-> **How to use the browser terminal.** Paste with **Ctrl+Shift+V** on Windows
-> or Linux, **Cmd+V** on Mac (or right-click → Paste). Copy by selecting text,
-> then **Ctrl+Shift+C** / **Cmd+C**. Run commands one block at a time and wait
-> for the prompt (`ubuntu@ip-...:~$`) to come back before pasting the next.
+> **Using the browser terminal.** Paste with **Ctrl+Shift+V** (Windows/Linux)
+> or **Cmd+V** (Mac), or right-click → Paste. Paste one block at a time and
+> wait for the `ubuntu@ip-...:~$` prompt before the next.
 
 ---
 
-## Before you start: you need a domain name
+## Step 1. Choose a domain name and point it at the server
 
-HTTPS certificates are issued for a name, not an IP address. Use either:
-
-- **A subdomain of a domain you already own**, e.g. `dpre.yourcompany.com`
-  (you will add one DNS record in step 4). This is the right choice for
-  anything you show to other people.
-- **For a quick trial with no domain**, a free `sslip.io` name built from the
-  server's IP, e.g. `3-110-22-33.sslip.io` for IP `3.110.22.33`. It needs no
-  DNS setup; skip step 4.
-
----
-
-## Step 1. Launch the server
-
-1. Sign in to the AWS console. In the top-right corner, pick the **Region**
-   closest to you (e.g. *US East (N. Virginia)*, *Asia Pacific (Mumbai)*).
-   Everything below happens in that region.
-2. Search for **EC2** in the top search bar and open it.
-3. Click **Launch instance** (orange button).
-4. Fill in the form:
-
-   | Field | What to choose |
-   | --- | --- |
-   | **Name** | `dpre` |
-   | **Application and OS Images** | **Ubuntu** → *Ubuntu Server 24.04 LTS*, architecture **64-bit (x86)** |
-   | **Instance type** | `t3.small` (2 GiB memory). `t3.micro` works for a trial but is tight. |
-   | **Key pair (login)** | **Create new key pair** → name `dpre-key`, type RSA, format `.pem` → **Create** (it downloads; keep it safe as a backup way in. You won't need it for the browser terminal.) |
-
-5. **Network settings** → keep the default VPC and subnet, make sure
-   **Auto-assign public IP** is *Enable*, then:
-   - ✅ **Allow SSH traffic from** → choose **Anywhere** (needed for the
-     browser *Connect* button; Ubuntu only accepts key-based logins, never
-     passwords). If you know how, you can tighten this later, see
-     *Troubleshooting*.
-   - ✅ **Allow HTTPS traffic from the internet**
-   - ✅ **Allow HTTP traffic from the internet** (Let's Encrypt uses it to
-     issue the certificate)
-6. **Configure storage** → set the size to **20 GiB**, type **gp3**. Click
-   **Advanced**, expand the volume, and set **Encrypted** to **Yes** (the
-   server will hold client metadata). Leave the KMS key as default.
-7. Click **Launch instance**, then **View all instances**. Wait until
-   *Instance state* is **Running** and *Status check* shows **2/2 checks
-   passed** (2–3 minutes; click the refresh icon).
-
-**Cost:** roughly USD 20 a month in most regions for a `t3.small` running
-24×7 (server, disk and public IP). A *stopped* instance only costs the disk and
-the Elastic IP; *terminating* deletes everything.
-
-## Step 2. Give the server a fixed IP address (Elastic IP)
-
-Without this, the public IP changes every time the server is stopped and
-started, and your domain would stop pointing at it.
-
-1. In the EC2 left menu: **Network & Security → Elastic IPs**.
-2. **Allocate Elastic IP address** → **Allocate**.
-3. Select the new address → **Actions → Associate Elastic IP address**.
-4. **Instance**: pick `dpre` → **Associate**.
-5. Note the address (e.g. `3.110.22.33`). This is your server's IP from now on.
-
-## Step 3. Open the browser terminal
-
-1. **Instances** → tick `dpre` → **Connect** (top of the page).
-2. Tab **EC2 Instance Connect** → *Connection type*: **Connect using a Public
-   IP** → username `ubuntu` → **Connect**.
-3. A new browser tab opens with a black terminal ending in `ubuntu@ip-...:~$`.
-
-If it fails to connect, see *Troubleshooting* at the bottom.
-
-## Step 4. Point your domain at the server
-
-*Skip this step if you are using an `sslip.io` name.*
-
-At whoever hosts your domain's DNS, add one record:
+Pick a name for this app, e.g. `dpre.yourdomain.com`. In your DNS provider's
+dashboard, add one record, the same way you did for the other app:
 
 | Type | Name / Host | Value | TTL |
 | --- | --- | --- | --- |
-| `A` | `dpre` (gives `dpre.yourcompany.com`) | your Elastic IP | 300 |
+| `A` | `dpre` | the server's **Elastic IP** (the same IP the other app uses) | 300 |
 
-In your DNS provider's dashboard (GoDaddy, Namecheap, Cloudflare, etc.), open
-*DNS / Manage DNS → Add record* and enter the values above. On Cloudflare, set
-the proxy status to **DNS only** (grey cloud), otherwise Caddy cannot get its
-certificate.
+(On Cloudflare, set the proxy status to **DNS only**, the grey cloud.)
 
-Check it from the browser terminal (repeat until it prints your Elastic IP; it
-usually takes a few minutes):
+Check it from the browser terminal. Repeat until it prints your server's IP:
 
 ```bash
-getent hosts dpre.yourcompany.com
+getent hosts dpre.yourdomain.com
 ```
 
-## Step 5. Install Docker
-
-Paste into the browser terminal:
+## Step 2. Download the code
 
 ```bash
-sudo apt-get update && sudo apt-get -y upgrade
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker ubuntu
+cd ~
+git clone https://github.com/CloudKatasani/Data-Product-Recommendation-Engine.git
+cd ~/Data-Product-Recommendation-Engine
+ls
 ```
 
-If you see a purple *Pending kernel upgrade* or *Daemons using outdated
-libraries* screen, press **Enter** to accept the defaults.
+You should see `dpre`, `docs`, `README.md` and others. This creates a new
+folder `~/Data-Product-Recommendation-Engine`, next to
+`~/AgenticDataProductManagement`.
 
-Now **close the terminal tab and click Connect again** (step 3), so the new
-Docker permission takes effect. Then check:
+## Step 3. Check the code runs
+
+Nothing needs installing: the app uses only Python's standard library, and
+Ubuntu already has `python3`. (Type `python3`, not `python`.)
 
 ```bash
-docker --version
-docker compose version
-docker run --rm hello-world
+cd ~/Data-Product-Recommendation-Engine
+python3 --version
+python3 -m dpre run automated --industry utility
 ```
 
-The last command should print *Hello from Docker!*.
+`python3 --version` must be 3.11 or newer (Ubuntu 24.04 has 3.12). The second
+command prints a run summary with candidates. That proves the code works.
 
-## Step 6. Download the application
-
-The repository is private, so the server needs permission to read it. A
-**deploy key** gives this one server read-only access to this one repository.
-
-1. Create the key on the server and print its public half:
-
-   ```bash
-   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -C "dpre-ec2"
-   cat ~/.ssh/id_ed25519.pub
-   ```
-
-2. Copy the whole line it prints (starts with `ssh-ed25519`).
-3. In GitHub, open the repository → **Settings → Deploy keys → Add deploy
-   key** → Title `dpre-ec2`, paste the key, leave **Allow write access
-   unticked** → **Add key**.
-4. Back in the terminal, download the code:
-
-   ```bash
-   ssh-keyscan github.com >> ~/.ssh/known_hosts
-   sudo mkdir -p /opt/dpre && sudo chown ubuntu: /opt/dpre
-   git clone git@github.com:cloudkatasani/data-product-recommendation-engine.git /opt/dpre
-   cd /opt/dpre/deploy/ec2-caddy
-   ls
-   ```
-
-   You should see `compose.yml`, `setup.sh`, `Caddyfile.example`.
-
-   (To deploy a branch other than the default one, add
-   `--branch <branch-name>` to the `git clone` line.)
-
-## Step 7. Configure: domain and users
-
-Run the setup script and answer its questions:
+Also check nothing else is already using port 8000:
 
 ```bash
-cd /opt/dpre/deploy/ec2-caddy
-./setup.sh
+sudo ss -ltnp | grep ':8000 ' || echo "port 8000 is free"
 ```
 
-It asks for:
+If it prints something other than `port 8000 is free`, tell whoever helps you,
+or change `8000` to `8001` everywhere in steps 4 and 5.
 
-1. **Domain name**: `dpre.yourcompany.com` (or your `sslip.io` name).
-2. **Your email**: Let's Encrypt only uses it for certificate expiry notices.
-3. **Users**, one at a time: a username, a role and a password (at least 12
-   characters; nothing shows while you type, which is normal). Roles:
+## Step 4. Run the app as a background service
 
-   | Choice | Role | Can do |
-   | --- | --- | --- |
-   | `1` | admin | upload extracts, run the pipeline, review candidates, steward metrics, download seeds |
-   | `2` | reviewer | read and accept/reject candidates |
-   | `3` | steward | read and resolve metric conflicts |
-   | `4` | council | approve score weights and waive gates |
-
-   Create at least one **admin** for yourself. Give **council** to a
-   different person from the reviewers; the engine refuses weight approval
-   by someone whose own reviews trained those weights.
-
-The first password takes a little longer because Docker downloads the Caddy
-image. When it finishes it says `Wrote .env and Caddyfile ...`.
-
-To add or remove users later, run `./setup.sh` again (it asks for everyone
-again and replaces the list), then `docker compose restart caddy`.
-
-## Step 8. Start it
+First, **set your domain** in a variable so the commands below can use it.
+Change the value to your real domain:
 
 ```bash
-cd /opt/dpre/deploy/ec2-caddy
-docker compose up -d --build
+DOMAIN=dpre.yourdomain.com
 ```
 
-The first run builds the engine image (about a minute). Then check:
+(If you close the terminal tab, run this line again before continuing.)
+
+Install the service. It starts the app now and again after every reboot:
 
 ```bash
-docker compose ps
+sed "s/dpre.example.com/$DOMAIN/" ~/Data-Product-Recommendation-Engine/deploy/ec2-caddy/dpre.service \
+  | sudo tee /etc/systemd/system/dpre.service > /dev/null
+mkdir -p ~/dpre-data
+sudo systemctl daemon-reload
+sudo systemctl enable --now dpre
+sudo systemctl status dpre --no-pager
 ```
 
-Both `dpre-dpre-1` and `dpre-caddy-1` should say **Up**; after about 30
-seconds the engine also shows **(healthy)**. Now watch Caddy get the
-certificate:
+Look for **`active (running)`** in green. Then check the app answers locally:
 
 ```bash
-docker compose logs caddy | grep -i certificate
+curl -s http://127.0.0.1:8000/api/v1/health
 ```
 
-Look for `certificate obtained successfully`. Press **q** if a pager opens.
+It prints a short JSON answer with `"status": "ok"`.
 
-## Step 9. Open the application
+The app keeps its data (database and uploads) in `~/dpre-data`.
 
-1. On your own computer, open `https://dpre.yourcompany.com` (your domain).
-2. The browser asks for a username and password: use one you created in
-   step 7.
-3. To prove it end to end: **Start → Automated**, pick an industry (e.g.
-   *utility*), and run it. You need the *admin* role for this.
+## Step 5. Add the site to Caddy, with a sign-in
 
-From the terminal you can also check who the engine thinks you are:
+### 5.1 Check Caddy
 
 ```bash
-curl -s -u youruser https://dpre.yourcompany.com/api/v1/whoami
+sudo systemctl status caddy --no-pager
 ```
 
-(It prompts for the password.) The answer names your user, its roles and
-`"auth_method": "trusted_proxy"`.
+Look for **`active (running)`**. If it says `Unit caddy.service could not be
+found`, Caddy is not installed the usual way. See *Appendix: Caddy is not
+installed* at the bottom.
 
-**You are done.** The containers restart by themselves if the server reboots.
+### 5.2 Back up the current Caddy config
+
+```bash
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.backup-$(date +%F)
+```
+
+### 5.3 Create your password
+
+Choose a username (e.g. your first name, lowercase) and run:
+
+```bash
+USERNAME=yourname
+HASH=$(caddy hash-password)
+```
+
+It asks for the password twice. Nothing appears while you type, which is
+normal. Use at least 12 characters.
+
+### 5.4 Add the site block
+
+This appends a new site to the end of `/etc/caddy/Caddyfile`. Your other
+app's site is left untouched.
+
+```bash
+sudo tee -a /etc/caddy/Caddyfile > /dev/null <<EOF
+
+# Data Product Recommendation Engine
+$DOMAIN {
+	request_body {
+		max_size 64MB
+	}
+
+	basic_auth {
+		$USERNAME $HASH
+	}
+
+	map {http.auth.user.id} {dpre_roles} {
+		$USERNAME "operator,reviewer,steward,catalog_admin"
+		default "reviewer"
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		header_up -X-DPRE-Identity
+		header_up -Authorization
+		header_up X-Forwarded-User {http.auth.user.id}
+		header_up X-Forwarded-Roles {dpre_roles}
+	}
+}
+EOF
+```
+
+### 5.5 Check the config and reload Caddy
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+The last line must say **`Valid configuration`**. If it doesn't, nothing has
+changed yet; see *Troubleshooting*. Then:
+
+```bash
+sudo systemctl reload caddy
+```
+
+Reloading does not interrupt your other app.
+
+### 5.6 Wait for the certificate
+
+```bash
+sleep 20; sudo journalctl -u caddy --since "5 min ago" --no-pager | grep -i "certificate obtained"
+```
+
+You should see a line containing `certificate obtained successfully` and your
+domain.
+
+## Step 6. Open the app
+
+1. On your laptop, open `https://dpre.yourdomain.com`.
+2. The browser asks for a username and password: use the ones from step 5.3.
+3. Try it: **Start → Automated**, pick an industry (e.g. *utility*), and run
+   it.
+
+To see who the app thinks you are, open
+`https://dpre.yourdomain.com/api/v1/whoami`. It shows your username, your
+roles and `"auth_method": "trusted_proxy"`.
+
+**You are done.**
 
 ---
 
-## Day-to-day operations
+## Adding more users
 
-All commands run from `/opt/dpre/deploy/ec2-caddy` in the browser terminal.
+Each person needs their own username, so the app records who approved or
+rejected what.
+
+1. Create the hash in the terminal: `caddy hash-password` (it prints a line
+   starting with `$2a$`; select it and copy it).
+2. Open the config: `sudo nano /etc/caddy/Caddyfile`
+3. In the `$DOMAIN { ... }` block:
+   - under `basic_auth {`, add a line: `newuser <pasted hash>`
+   - under `map ... {dpre_roles} {`, add a line: `newuser "reviewer"`
+4. Save with **Ctrl+O**, **Enter**, then exit with **Ctrl+X**.
+5. Run step 5.5 again (validate, then reload).
+
+Roles you can give (several, comma separated, inside the quotes):
+
+| Role | Can do |
+| --- | --- |
+| `operator` | upload extracts and run the pipeline |
+| `reviewer` | accept or reject candidates |
+| `steward` | resolve metric conflicts, accept metric names |
+| `catalog_admin` | download seeds and catalog payloads |
+| `council` | approve score weights and waive gates. Give this to someone who does **not** review: the app refuses weight approval by a person whose own reviews trained those weights. |
+
+A user not listed under `map` gets `reviewer`.
+
+To remove someone, delete their two lines and repeat steps 4–5.
+
+## Day-to-day commands
 
 | Task | Command |
 | --- | --- |
-| See if it is running | `docker compose ps` |
-| Engine logs (last 100 lines) | `docker compose logs --tail 100 dpre` |
-| Follow logs live | `docker compose logs -f` (Ctrl+C to stop) |
-| Restart everything | `docker compose restart` |
-| Stop (keeps data) | `docker compose down` |
-| Start again | `docker compose up -d` |
-| Add/remove/change users | `./setup.sh` then `docker compose restart caddy` |
+| Is the app running? | `sudo systemctl status dpre --no-pager` |
+| App logs (last 100 lines) | `sudo journalctl -u dpre -n 100 --no-pager` |
+| Follow app logs live | `sudo journalctl -u dpre -f` (Ctrl+C to stop) |
+| Restart the app | `sudo systemctl restart dpre` |
+| Caddy logs | `sudo journalctl -u caddy -n 100 --no-pager` |
 
-**Never** run `docker compose down -v` or `docker volume rm`: the `-v` deletes
-the database.
-
-### Updating to a new version
+## Updating to a new version
 
 ```bash
-cd /opt/dpre && git pull
-cd deploy/ec2-caddy && docker compose up -d --build
+cd ~/Data-Product-Recommendation-Engine
+git pull
+sudo systemctl restart dpre
 ```
 
-Take a backup first (below). The database upgrades itself on start.
+Take a backup first (below). The database upgrades itself when the app starts.
 
-### Backups
+## Backups
 
-All data lives in the Docker volume `dpre-data` on the server's disk.
-
-**Automatic daily disk snapshots** (recommended, set up once in the console):
-
-1. EC2 left menu: **Elastic Block Store → Lifecycle Manager → Create
-   lifecycle policy**.
-2. **EBS snapshot policy** → Next.
-3. **Target resource types**: *Instance* → *Target resource tags*: key
-   `Name`, value `dpre` → Next.
-4. Schedule: every **24 hours**, retain **14** snapshots → **Create policy**.
-
-**A copy of the database on demand** (safe while the app runs):
+All the app's data is in `~/dpre-data`. To make a safe copy of the database
+while the app is running:
 
 ```bash
-cd /opt/dpre/deploy/ec2-caddy
-docker compose exec dpre python -c "import sqlite3; s=sqlite3.connect('/var/lib/dpre/private/engine.db'); d=sqlite3.connect('/var/lib/dpre/private/engine.backup.db'); s.backup(d); d.close()"
-docker compose cp dpre:/var/lib/dpre/private/engine.backup.db ~/engine-$(date +%F).db
+python3 -c "import sqlite3; s=sqlite3.connect('/home/ubuntu/dpre-data/private/engine.db'); d=sqlite3.connect('/home/ubuntu/engine-$(date +%F).db'); s.backup(d); d.close()"
 ls -lh ~/engine-*.db
 ```
+
+For automatic protection, set up daily snapshots of the server's disk in the
+console: **EC2 → Elastic Block Store → Lifecycle Manager → Create lifecycle
+policy → EBS snapshot policy**, target the instance by its `Name` tag,
+every 24 hours, keep 14.
 
 ---
 
@@ -312,46 +285,52 @@ ls -lh ~/engine-*.db
 
 | Symptom | Cause and fix |
 | --- | --- |
-| **Connect** button fails: *Failed to connect to your instance* | The security group does not allow SSH from EC2 Instance Connect. **Instances → dpre → Security tab →** click the security group → **Edit inbound rules** → make sure there is a rule *SSH, port 22, source 0.0.0.0/0*. (Tighter option: source = the prefix list `com.amazonaws.<your-region>.ec2-instance-connect`; type `ec2-instance-connect` in the source box to find it.) Also check the instance has a public IP. |
-| `permission denied ... docker.sock` | You did not reconnect after step 5. Close the terminal tab and **Connect** again. |
-| `git clone` says *Permission denied (publickey)* | The deploy key was not added to *this* repository, or was pasted incompletely. Repeat step 6.1–6.3. |
-| `setup.sh: Permission denied` | Run `chmod +x setup.sh` then `./setup.sh`. |
-| `docker compose up` says *set DPRE_DOMAIN in .env* | Run `./setup.sh` first, from `/opt/dpre/deploy/ec2-caddy`. |
-| Browser: *This site can't be reached* | DNS not pointing at the Elastic IP yet (`getent hosts yourdomain`), or HTTP/HTTPS missing from the security group (add *HTTP 80* and *HTTPS 443* from *Anywhere-IPv4*). |
-| Browser: certificate warning, or Caddy logs show `challenge failed` | Port 80 is not open, DNS points somewhere else, or Cloudflare proxy (orange cloud) is on. Fix, then `docker compose restart caddy`. |
-| Password prompt keeps coming back | Wrong username or password. Re-run `./setup.sh` and `docker compose restart caddy`. |
-| Page shows `DPRE-HTTP-001` | The domain you typed in the browser differs from the one in `.env`. Re-run `./setup.sh` with the exact name, then `docker compose up -d`. |
-| Page says the request carries no identity (`DPRE-AUTH-001`) | `compose.yml` was edited and Caddy is no longer at `172.30.0.10`. Restore it with `git checkout compose.yml && docker compose up -d`. |
-| Action refused with `DPRE-AUTH-002` | Your user lacks the role (e.g. only admins can run the pipeline). Change it with `./setup.sh`. |
-| Engine not *(healthy)* | `docker compose logs --tail 50 dpre` shows why. |
+| `Command 'python' not found` | Use `python3`. |
+| `No module named dpre` | You are not in the code folder. Run `cd ~/Data-Product-Recommendation-Engine` first. |
+| `systemctl status dpre` is not running | `sudo journalctl -u dpre -n 50 --no-pager` shows why. A `refusing to bind` line means `/etc/systemd/system/dpre.service` was edited; repeat step 4. |
+| `caddy validate` fails | Usually the domain line is empty because `DOMAIN`/`USERNAME`/`HASH` were not set in this terminal tab. Restore the backup: `sudo cp /etc/caddy/Caddyfile.backup-<date> /etc/caddy/Caddyfile`, then repeat step 5 from 5.3 after running the `DOMAIN=...` line again. |
+| Browser: *This site can't be reached* | DNS not pointing at the server yet (`getent hosts yourdomain`). |
+| Certificate warning, or Caddy log shows `challenge failed` | DNS points somewhere else, or Cloudflare proxy (orange cloud) is on. Fix, then `sudo systemctl reload caddy`. |
+| Password prompt keeps coming back | Wrong username or password. Create a new hash and replace it in the Caddyfile (see *Adding more users*). |
+| Page shows `DPRE-HTTP-001` | The domain in the browser differs from the one in the service. Run the `DOMAIN=...` line with the exact name, repeat step 4. |
+| Page shows `DPRE-AUTH-001` (no identity) | The Caddy block is missing the `header_up X-Forwarded-User` line, or points at the wrong port. Compare with step 5.4. |
+| Action refused with `DPRE-AUTH-002` | Your user lacks that role. Add it in the Caddyfile `map` block and reload. |
+| `502 Bad Gateway` | Caddy cannot reach the app: `sudo systemctl restart dpre` and check its logs. |
 
----
+## Appendix: Caddy is not installed
 
-## Optional improvements
+If step 5.1 found no Caddy service, check whether the other app runs Caddy in
+Docker (`sudo docker ps | grep -i caddy`). If it does, don't install a second
+Caddy (both would need ports 80 and 443). Ask for help adding this site to that
+Caddy instead.
 
-- **Single sign-on (Google, Microsoft, Okta) instead of passwords.** Replace
-  `basic_auth` in the Caddyfile with Caddy's `forward_auth` pointing at an
-  `oauth2-proxy` container, and copy its user and group headers into
-  `X-Forwarded-User` / `X-Forwarded-Roles`. The engine side does not change.
-- **Machine clients with API tokens.** The password sign-in uses the
-  `Authorization` header, so tokens need their own hostname without
-  `basic_auth`, plus `DPRE_TOKENS` on the engine (`docs/deployment.md`).
-- **Only allow your office or VPN.** In the security group, change the
-  *HTTPS 443* source from *Anywhere* to your network range. Keep *HTTP 80*
-  open to everyone so the certificate can renew.
+If there is no Caddy at all, install it (official Caddy packages for Ubuntu):
+
+```bash
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+```
+
+The new install comes with a sample `/etc/caddy/Caddyfile` that serves a
+welcome page on port 80. Empty it with
+`echo | sudo tee /etc/caddy/Caddyfile`, then continue with step 5.2. Make sure
+the instance's security group allows **HTTP (80)** and **HTTPS (443)** from
+anywhere.
 
 ## How it fits together (for the curious)
 
-- `compose.yml` puts both containers on a private network `172.30.0.0/24`
-  with fixed addresses: Caddy `172.30.0.10`, engine `172.30.0.20`. Only Caddy
-  publishes ports (80 and 443).
-- The engine runs with `DPRE_HOST=0.0.0.0` and
-  `DPRE_TRUSTED_PROXY=172.30.0.10`: it accepts `X-Forwarded-User` and
-  `X-Forwarded-Roles` only from Caddy's address, and because it is not bound
-  to loopback, the development sign-in header is switched off.
-- The Caddyfile written by `setup.sh` checks the password, removes any
-  identity headers the visitor sent, and sets its own from the signed-in user.
+- The service (`deploy/ec2-caddy/dpre.service`) runs
+  `python3 -m dpre serve --host 127.0.0.1 --port 8000`, so the app is not
+  reachable from the internet directly, only through Caddy.
+- `DPRE_TRUSTED_PROXY=127.0.0.1` tells the app to accept the
+  `X-Forwarded-User` and `X-Forwarded-Roles` headers from Caddy.
+- Caddy's site block (`deploy/ec2-caddy/Caddyfile.snippet` is a reference copy)
+  checks the password, removes any identity headers the visitor sent, and sets
+  its own from the signed-in user. So a visitor cannot claim to be someone
+  else.
 - `DPRE_ALLOWED_HOSTS` is your domain, so requests addressed to any other name
   are refused.
-- General engine configuration is in `docs/deployment.md`; the security
-  reasoning is in `docs/security.md`.
+- General configuration is in `docs/deployment.md`; the security reasoning is
+  in `docs/security.md`.
