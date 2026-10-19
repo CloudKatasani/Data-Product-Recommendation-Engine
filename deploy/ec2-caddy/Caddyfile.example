@@ -1,4 +1,4 @@
-# Copy to ./Caddyfile (git-ignored) and fill in users. See docs/deploy-ec2-caddy.md.
+# Reference only: setup.sh writes the real ./Caddyfile for you. See docs/deploy-ec2-caddy.md.
 {
 	email {$ACME_EMAIL}
 }
