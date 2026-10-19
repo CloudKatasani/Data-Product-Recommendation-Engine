@@ -114,12 +114,10 @@ At whoever hosts your domain's DNS, add one record:
 | --- | --- | --- | --- |
 | `A` | `dpre` (gives `dpre.yourcompany.com`) | your Elastic IP | 300 |
 
-- **Route 53** (if your domain is in AWS): *Route 53 → Hosted zones →* your
-  domain → **Create record** → Record name `dpre`, type **A**, value = Elastic
-  IP → **Create records**.
-- **GoDaddy, Namecheap, Cloudflare, etc.**: *DNS / Manage DNS → Add record*
-  with the values above. On Cloudflare, set the proxy status to **DNS only**
-  (grey cloud), otherwise Caddy cannot get its certificate.
+In your DNS provider's dashboard (GoDaddy, Namecheap, Cloudflare, etc.), open
+*DNS / Manage DNS → Add record* and enter the values above. On Cloudflare, set
+the proxy status to **DNS only** (grey cloud), otherwise Caddy cannot get its
+certificate.
 
 Check it from the browser terminal (repeat until it prints your Elastic IP; it
 usually takes a few minutes):
