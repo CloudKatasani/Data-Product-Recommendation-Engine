@@ -31,8 +31,30 @@ that up.
 
 ## Step 1. Choose a domain name and point it at the server
 
-Pick a name for this app, e.g. `dpre.yourdomain.com`. In your DNS provider's
-dashboard, add one record, the same way you did for the other app:
+> **`dpre.example.com` in this guide is only an example.** Everywhere you see
+> it, type your own name instead. If you paste it unchanged, the browser warns
+> *Your connection is not private* (`ERR_CERT_COMMON_NAME_INVALID`).
+
+Pick a name for this app under a domain you own. If your other app is at
+`adpm.mycompany.com`, use `dpre.mycompany.com`. To see which domain the other
+app uses:
+
+```bash
+sudo grep -nE '^[^#[:space:]].*\{' /etc/caddy/Caddyfile
+```
+
+**No domain of your own?** Use a free name built from the server's IP. It
+needs no DNS record, so you can skip the rest of this step:
+
+```bash
+echo "$(curl -s https://checkip.amazonaws.com | tr . -).sslip.io"
+```
+
+It prints something like `3-110-22-33.sslip.io`. Use it only if the server has
+an Elastic IP; otherwise the name breaks when the IP changes.
+
+To use your own domain, add one record in your DNS provider's dashboard, the
+same way you did for the other app:
 
 | Type | Name / Host | Value | TTL |
 | --- | --- | --- | --- |
@@ -43,7 +65,7 @@ dashboard, add one record, the same way you did for the other app:
 Check it from the browser terminal. Repeat until it prints your server's IP:
 
 ```bash
-getent hosts dpre.yourdomain.com
+getent hosts dpre.example.com     # your name here
 ```
 
 ## Step 2. Download the code
@@ -85,10 +107,10 @@ or change `8000` to `8001` everywhere in steps 4 and 5.
 ## Step 4. Run the app as a background service
 
 First, **set your domain** in a variable so the commands below can use it.
-Change the value to your real domain:
+Replace `dpre.example.com` with your real name from step 1:
 
 ```bash
-DOMAIN=dpre.yourdomain.com
+DOMAIN=dpre.example.com
 ```
 
 (If you close the terminal tab, run this line again before continuing.)
@@ -203,13 +225,13 @@ domain.
 
 ## Step 6. Open the app
 
-1. On your laptop, open `https://dpre.yourdomain.com`.
+1. On your laptop, open `https://` followed by your name from step 1 (e.g. `https://dpre.mycompany.com`).
 2. The browser asks for a username and password: use the ones from step 5.3.
 3. Try it: **Start → Automated**, pick an industry (e.g. *utility*), and run
    it.
 
 To see who the app thinks you are, open
-`https://dpre.yourdomain.com/api/v1/whoami`. It shows your username, your
+`https://<your name>/api/v1/whoami`. It shows your username, your
 roles and `"auth_method": "trusted_proxy"`.
 
 **You are done.**
@@ -290,7 +312,8 @@ every 24 hours, keep 14.
 | `systemctl status dpre` is not running | `sudo journalctl -u dpre -n 50 --no-pager` shows why. A `refusing to bind` line means `/etc/systemd/system/dpre.service` was edited; repeat step 4. |
 | `caddy validate` says `unrecognized directive: basic_auth` | Your Caddy is older than 2.8 and spells it `basicauth`. Fix it with `sudo sed -i 's/\bbasic_auth\b/basicauth/' /etc/caddy/Caddyfile`, then validate again. (Newer Caddy accepts `basicauth` too, with a deprecation warning you can ignore.) |
 | `caddy validate` fails | Usually the domain line is empty because `DOMAIN`/`USERNAME`/`HASH` were not set in this terminal tab. Restore the backup: `sudo cp /etc/caddy/Caddyfile.backup-<date> /etc/caddy/Caddyfile`, then repeat step 5 from 5.3 after running the `DOMAIN=...` line again. |
-| Browser: *This site can't be reached* | DNS not pointing at the server yet (`getent hosts yourdomain`). |
+| Browser: *This site can't be reached* | DNS not pointing at the server yet (`getent hosts <your name>`). |
+| *Your connection is not private*, `ERR_CERT_COMMON_NAME_INVALID` | The example name `dpre.example.com` (or another placeholder) was used instead of your real one. Fix both files: `REAL=<your name>`, then `sudo sed -i "s/dpre\.example\.com/$REAL/g" /etc/caddy/Caddyfile /etc/systemd/system/dpre.service`, then repeat step 5.5 and run `sudo systemctl daemon-reload && sudo systemctl restart dpre`. |
 | Certificate warning, or Caddy log shows `challenge failed` | DNS points somewhere else, or Cloudflare proxy (orange cloud) is on. Fix, then `sudo systemctl reload caddy`. |
 | Password prompt keeps coming back | Wrong username or password. Create a new hash and replace it in the Caddyfile (see *Adding more users*). |
 | Page shows `DPRE-HTTP-001` | The domain in the browser differs from the one in the service. Run the `DOMAIN=...` line with the exact name, repeat step 4. |
