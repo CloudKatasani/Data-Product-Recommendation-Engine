@@ -1,0 +1,25 @@
+# Site block to ADD to /etc/caddy/Caddyfile, below your existing sites.
+# See docs/deploy-ec2-caddy.md. Hash passwords with: caddy hash-password
+dpre.example.com {
+	request_body {
+		max_size 64MB
+	}
+
+	basic_auth {
+		alice PASTE_HASH_HERE
+	}
+
+	# Roles: operator, reviewer, steward, catalog_admin, council.
+	map {http.auth.user.id} {dpre_roles} {
+		alice "operator,reviewer,steward,catalog_admin"
+		default "reviewer"
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		# Never pass on what the visitor claimed; set the identity ourselves.
+		header_up -X-DPRE-Identity
+		header_up -Authorization
+		header_up X-Forwarded-User {http.auth.user.id}
+		header_up X-Forwarded-Roles {dpre_roles}
+	}
+}

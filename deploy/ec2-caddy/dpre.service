@@ -1,0 +1,19 @@
+# systemd unit for the engine on EC2 behind Caddy. See docs/deploy-ec2-caddy.md.
+# Replace dpre.example.com with your domain before installing.
+[Unit]
+Description=Data Product Recommendation Engine
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Data-Product-Recommendation-Engine
+Environment=DPRE_TRUSTED_PROXY=127.0.0.1
+Environment=DPRE_ALLOWED_HOSTS=dpre.example.com
+Environment=DPRE_MAX_UPLOAD_MB=64
+Environment=DPRE_LOG_FORMAT=json
+ExecStart=/usr/bin/python3 -m dpre serve --host 127.0.0.1 --port 8000 --workspace /home/ubuntu/dpre-data
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
