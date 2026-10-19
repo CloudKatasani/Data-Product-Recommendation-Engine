@@ -96,6 +96,9 @@ source is configured — by design.
 
 ## Reverse proxy
 
+For a single EC2 instance behind Caddy, follow `docs/deploy-ec2-caddy.md`;
+the files are in `deploy/ec2-caddy/`.
+
 Minimal nginx in front of `oauth2-proxy` (or any IdP-aware proxy):
 
 ```nginx
